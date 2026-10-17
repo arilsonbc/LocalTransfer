@@ -12,7 +12,7 @@ Transferência de fotos e arquivos entre iPhone, Android, Windows e outros compu
 
 Site: https://localtransfer-web.wise-sun-9588.chatgpt.site
 
-A publicação inicial é privada: acesse com a conta proprietária do Site nos dois aparelhos. A política de acesso pode ser alterada separadamente.
+O site é público e não exige login. Apenas quem conhece o código ou link da sala pode tentar conectar o segundo aparelho.
 
 ## Arquitetura
 
@@ -71,3 +71,4 @@ Implementação web própria, inspirada no uso de transferência entre dispositi
 Referência: https://github.com/localsend/localsend (Apache-2.0).
 
 O código LocalTransfer está sob Apache-2.0. Avisos de licença do template Sites e das dependências estão preservados nos respectivos arquivos. Não há vínculo oficial com o projeto LocalSend.
+
