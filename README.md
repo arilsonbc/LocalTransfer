@@ -30,6 +30,7 @@ A integração deve fornecer um destes pares de variáveis, sempre no servidor:
 
 - `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`
 - ou `KV_REST_API_URL` e `KV_REST_API_TOKEN`
+- ou `localtransfer_KV_REST_API_URL` e `localtransfer_KV_REST_API_TOKEN` (prefixo da integração deste projeto)
 
 Não use prefixo `NEXT_PUBLIC_` nessas variáveis. Não coloque tokens no GitHub. O arquivo `.env.example` contém somente exemplos.
 
