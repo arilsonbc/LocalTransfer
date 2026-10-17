@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
@@ -13,15 +12,21 @@ function source(file, replacements={}) {
 const serviceUrl=source('lib/room-service.ts');
 const service=await import(serviceUrl);
 const transfer=await import(source('lib/transfer.ts'));
-const sqlite=new DatabaseSync(':memory:');
-sqlite.exec(readFileSync(new URL('../drizzle/0000_dashing_roughhouse.sql',import.meta.url),'utf8').replaceAll('--> statement-breakpoint',''));
-const db={prepare(sql){return {values:[],bind(...values){this.values=values;return this;},async first(){return sqlite.prepare(sql).get(...this.values)||null;},async run(){const r=sqlite.prepare(sql).run(...this.values);return {meta:{changes:Number(r.changes)}};}};},async batch(statements){return Promise.all(statements.map(s=>s.run()));}};
-globalThis.__testEnv={DB:db};
-const envUrl='data:text/javascript,export const env=globalThis.__testEnv';
-const create=await import(source('app/api/rooms/route.ts',{'cloudflare:workers':envUrl,'../../../lib/room-service':serviceUrl}));
-const join=await import(source('app/api/rooms/[code]/join/route.ts',{'cloudflare:workers':envUrl,'../../../../../lib/room-service':serviceUrl}));
-const room=await import(source('app/api/rooms/[code]/route.ts',{'cloudflare:workers':envUrl,'../../../../lib/room-service':serviceUrl}));
-const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','cf-connecting-ip':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
+const records=new Map(),counts=new Map();
+const db={
+  async create(row){if(records.has(row.code))return false;records.set(row.code,structuredClone(row));return true;},
+  async get(code){const row=records.get(code);return row&&row.expires_at>Date.now()?structuredClone(row):null;},
+  async join(code,token,name){const row=records.get(code);if(!row||row.expires_at<=Date.now()||row.guest_token)return null;row.guest_token=token;row.guest_name=name;return structuredClone(row);},
+  async signal(code,role,digest,description){const row=records.get(code);if(!row||row.expires_at<=Date.now()||row[role+'_token']!==digest)return false;row[role==='host'?'offer':'answer']=description;return true;},
+  async remove(code,digest){const row=records.get(code);if(!row||![row.host_token,row.guest_token].includes(digest))return false;return records.delete(code);},
+  async allow(key,max){const count=(counts.get(key)||0)+1;counts.set(key,count);return count<=max;},
+};
+globalThis.__testStore=db;
+const storeUrl='data:text/javascript,export const getRoomStore=()=>globalThis.__testStore';
+const create=await import(source('app/api/rooms/route.ts',{'../../../lib/room-store':storeUrl,'../../../lib/room-service':serviceUrl}));
+const join=await import(source('app/api/rooms/[code]/join/route.ts',{'../../../../../lib/room-store':storeUrl,'../../../../../lib/room-service':serviceUrl}));
+const room=await import(source('app/api/rooms/[code]/route.ts',{'../../../../lib/room-store':storeUrl,'../../../../lib/room-service':serviceUrl}));
+const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
 const context=code=>({params:Promise.resolve({code})});
 async function newRoom(){const response=await create.POST(request('/api/rooms','POST',{name:'Computador'}));assert.equal(response.status,201);return response.json();}
 
@@ -51,7 +56,7 @@ test('criação, convite exclusivo, troca de SDP e autorização',async()=>{
   assert.deepEqual(JSON.parse(polled.description),fakeSdp);
   assert.equal(polled.peerName,'Computador');
   assert.equal((await room.POST(request('/','POST',{description:JSON.stringify(fakeSdp)},guest.token),context(host.code))).status,400);
-  const persisted=sqlite.prepare('SELECT host_token,guest_token FROM rooms WHERE code=?').get(host.code);
+  const persisted=records.get(host.code);
   assert.notEqual(persisted.host_token,host.token);
   assert.notEqual(persisted.guest_token,guest.token);
   assert.equal((await room.DELETE(request('/','DELETE',undefined,host.token),context(host.code))).status,200);
@@ -59,13 +64,13 @@ test('criação, convite exclusivo, troca de SDP e autorização',async()=>{
 });
 test('salas expiradas e origem externa são rejeitadas',async()=>{
   const host=await newRoom();
-  sqlite.prepare('UPDATE rooms SET expires_at=0 WHERE code=?').run(host.code);
+  records.get(host.code).expires_at=0;
   assert.equal((await room.GET(request('/','GET',undefined,host.token),context(host.code))).status,401);
   assert.equal((await join.POST(request('/','POST',{name:'celular'}),context(host.code))).status,404);
   assert.equal((await create.POST(request('/','POST',{name:'x'},undefined,'https://outro.test'))).status,403);
 });
 test('limite de tentativas é aplicado',async()=>{
-  const req=new Request('https://localtransfer.test',{headers:{'cf-connecting-ip':'test-fixed-ip'}});
+  const req=new Request('https://localtransfer.test',{headers:{'x-forwarded-for':'test-fixed-ip'}});
   assert.equal(await service.allowed(db,req,'limited',2),true);
   assert.equal(await service.allowed(db,req,'limited',2),true);
   assert.equal(await service.allowed(db,req,'limited',2),false);

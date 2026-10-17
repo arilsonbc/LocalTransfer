@@ -1,3 +1,4 @@
+import type { RoomStore } from "./room-store";
 export const ROOM_TTL = 20 * 60 * 1000;
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const ROOM_PATTERN = /^[A-HJ-NP-Z2-9]{8}$/;
@@ -33,21 +34,18 @@ export async function body(request: Request): Promise<Record<string, unknown>> {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Solicitação inválida.");
   return data;
 }
-export async function allowed(db: D1Database, request: Request, action: string, max: number) {
+export async function allowed(store: RoomStore, request: Request, action: string, max: number) {
   const now = Date.now();
-  const ip = request.headers.get("cf-connecting-ip") || "local";
+  const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
   const key = await hash(`${ip}:${action}:${Math.floor(now / 60000)}`);
-  const row = await db.prepare(`INSERT INTO rate_limits (key,count,expires_at) VALUES (?,1,?)
-    ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count`).bind(key, now + 120000).first<{count:number}>();
-  return !!row && row.count <= max;
+  return store.allow(key, max);
 }
-export type RoomRow = {code:string;host_token:string;guest_token:string|null;host_name:string;guest_name:string|null;offer:string|null;answer:string|null;expires_at:number};
-export async function authenticate(db: D1Database, code: string, request: Request) {
+export async function authenticate(store: RoomStore, code: string, request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer /, "") || "";
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
-  const row = await db.prepare("SELECT * FROM rooms WHERE code=? AND expires_at>?").bind(code, Date.now()).first<RoomRow>();
+  const row = await store.get(code);
   if (!row) return null;
   const digest = await hash(token);
   const role = digest === row.host_token ? "host" : digest === row.guest_token ? "guest" : null;
-  return role ? {row, role} : null;
+  return role ? {row, role, digest} : null;
 }
