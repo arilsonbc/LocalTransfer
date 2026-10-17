@@ -1,1 +1,1 @@
-export { default } from "./transfer-app";
+export { default } from "./guided-transfer";

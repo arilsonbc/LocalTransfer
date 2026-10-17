@@ -1,0 +1,223 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { ArrowDownToLine, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Check, CheckCheck, Copy, File as FileIcon, HelpCircle, LoaderCircle, LockKeyhole, Plus, ShieldCheck, UploadCloud, X } from "lucide-react";
+import { api, MAX_BATCH, MAX_FILES, safeFilename, TransferConnection, type FileInfo, type Offer, type Session } from "../lib/transfer";
+
+type Mode = "choose" | "send" | "receive";
+type Received = FileInfo & { url: string };
+type Progress = { name: string; current: number; total: number; direction: string };
+const size = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const prettyCode = (code: string) => `${code.slice(0, 4)} ${code.slice(4)}`;
+
+export default function GuidedTransfer() {
+  const [mode, setMode] = useState<Mode>("choose");
+  const [files, setFiles] = useState<File[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("Computador");
+  const [peer, setPeer] = useState("");
+  const [state, setState] = useState("idle");
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [offer, setOffer] = useState<Offer | null>(null);
+  const [received, setReceived] = useState<Received[]>([]);
+  const [progress, setProgress] = useState<Progress | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [complete, setComplete] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [help, setHelp] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+  const connection = useRef<TransferConnection | null>(null);
+  const sessionRef = useRef<Session | null>(null);
+  const urls = useRef<string[]>([]);
+  const retainedBytes = useRef(0);
+  const autoStarted = useRef(false);
+  const epoch = useRef(0);
+  const total = files.reduce((n, f) => n + f.size, 0);
+  const connected = state === "connected";
+
+  useEffect(() => {
+    const ua = navigator.userAgent;
+    setName(/iPhone|iPad/i.test(ua) ? "iPhone / iPad" : /Android/i.test(ua) ? "Android" : /Macintosh/i.test(ua) ? "Mac" : "Computador");
+    const invite = new URLSearchParams(location.hash.slice(1)).get("sala");
+    if (invite) { setMode("receive"); setCode(invite.slice(0, 12)); }
+    return () => { connection.current?.close(); urls.current.forEach(u => URL.revokeObjectURL(u)); };
+  }, []);
+
+  useEffect(() => {
+    if (!sending && !progress && !received.length) return;
+    const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", prevent);
+    return () => window.removeEventListener("beforeunload", prevent);
+  }, [sending, progress, received.length]);
+
+  // Connecting is sufficient: no second Send button is needed after pairing.
+  useEffect(() => {
+    if (mode === "send" && connected && files.length && !autoStarted.current) {
+      autoStarted.current = true;
+      void sendFiles();
+    }
+  }, [mode, connected, files]); // sendFiles uses the selected batch for this connection.
+
+  function remember(direction: "send" | "receive", count: number) {
+    try {
+      const old = JSON.parse(localStorage.getItem("localtransfer-history") || "[]");
+      localStorage.setItem("localtransfer-history", JSON.stringify([{ id: crypto.randomUUID(), direction, count, time: new Date().toISOString() }, ...(Array.isArray(old) ? old : [])].slice(0, 30)));
+    } catch { /* Saving a local record is optional. */ }
+  }
+
+  function attach(s: Session, currentEpoch: number) {
+    if (currentEpoch !== epoch.current) {
+      void api(`/api/rooms/${s.code}`, "DELETE", undefined, s.token).catch(() => {});
+      return;
+    }
+    sessionRef.current = s; setSession(s); setPeer(s.peerName || ""); setState("connecting");
+    const active = () => epoch.current === currentEpoch;
+    const conn = new TransferConnection(s, {
+      state: (next, message) => { if (active()) { setState(next); setStatus(message); } },
+      peer: value => { if (active()) setPeer(value); },
+      offer: incoming => {
+        if (!active()) return;
+        if (incoming && retainedBytes.current + incoming.files.reduce((n, f) => n + f.size, 0) > MAX_BATCH) {
+          queueMicrotask(() => connection.current?.reject());
+          setError("Salve os arquivos que já chegaram e toque em Limpar lista antes de receber mais."); return;
+        }
+        setOffer(incoming);
+      },
+      progress: (fileName, current, fileTotal, direction) => { if (active()) setProgress({ name: fileName, current, total: fileTotal, direction }); },
+      file: (info, blob) => {
+        if (!active()) return;
+        const url = URL.createObjectURL(blob); urls.current.push(url); retainedBytes.current += blob.size;
+        setReceived(old => [...old, { ...info, name: safeFilename(info.name), url }]);
+      },
+      complete: (direction, count) => {
+        if (!active()) return;
+        setComplete(true); setProgress(null); setSending(false); remember(direction, count);
+      },
+      error: message => { if (active()) { setError(message); setSending(false); setProgress(null); } },
+    });
+    connection.current = conn; void conn.start();
+  }
+
+  async function createCode() {
+    const currentEpoch = epoch.current;
+    setLoading(true); setError("");
+    try {
+      if (!window.RTCPeerConnection) throw new Error("Abra este site em um navegador atualizado, como Safari, Chrome, Edge ou Firefox.");
+      attach(await api<Session>("/api/rooms", "POST", { name }), currentEpoch);
+    } catch (e) { if (epoch.current === currentEpoch) setError(e instanceof Error ? e.message : "Não foi possível gerar o código."); }
+    finally { if (epoch.current === currentEpoch) setLoading(false); }
+  }
+
+  function chooseFiles(list: FileList | File[] | null) {
+    if (!list?.length || sending) return;
+    const next = [...files];
+    for (const f of Array.from(list)) if (!next.some(old => old.name === f.name && old.size === f.size && old.lastModified === f.lastModified)) next.push(f);
+    if (next.length > MAX_FILES || next.reduce((n, f) => n + f.size, 0) > MAX_BATCH) {
+      setError("Escolha até 500 arquivos e 200 MB por vez. Você pode enviar outros depois."); return;
+    }
+    setFiles(next); setError(""); setComplete(false);
+    if (!sessionRef.current && !loading) void createCode();
+  }
+
+  async function join() {
+    const normalized = code.toUpperCase().replace(/[\s-]/g, "");
+    if (normalized.length !== 8) { setError("Digite os 8 caracteres mostrados no aparelho que vai enviar."); return; }
+    const currentEpoch = epoch.current;
+    setLoading(true); setError("");
+    try {
+      if (!window.RTCPeerConnection) throw new Error("Use um navegador atualizado para receber os arquivos.");
+      attach(await api<Session>(`/api/rooms/${encodeURIComponent(normalized)}/join`, "POST", { name }), currentEpoch);
+    } catch (e) { if (epoch.current === currentEpoch) setError(e instanceof Error ? e.message : "Confira o código e tente novamente."); }
+    finally { if (epoch.current === currentEpoch) setLoading(false); }
+  }
+
+  async function sendFiles() {
+    const conn = connection.current;
+    if (!conn || !files.length) return;
+    setSending(true); setError(""); setComplete(false);
+    try { await conn.send(files); }
+    catch (e) { if (connection.current === conn) setError(e instanceof Error ? e.message : "O envio foi interrompido."); }
+    finally { if (connection.current === conn) { setSending(false); setProgress(null); } }
+  }
+
+  function disconnect() {
+    epoch.current++; connection.current?.close(); connection.current = null;
+    const old = sessionRef.current; sessionRef.current = null;
+    if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
+    setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);
+    setOffer(null); setProgress(null); setComplete(false); setError(""); autoStarted.current = false;
+  }
+
+  function restart(next: Mode = "choose") {
+    disconnect(); setFiles([]); setCode(""); setMode(next); setCopied(false);
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  }
+
+  function clearReceived() {
+    urls.current.forEach(u => URL.revokeObjectURL(u)); urls.current = []; retainedBytes.current = 0; setReceived([]);
+  }
+
+  async function copyCode() {
+    if (!session) return;
+    try { await navigator.clipboard.writeText(session.code); setCopied(true); setTimeout(() => setCopied(false), 2500); }
+    catch { setError("Não foi possível copiar automaticamente. Selecione o código e copie ou digite no outro aparelho."); }
+  }
+
+  const sendingStep = complete ? 3 : session ? 2 : 1;
+  const receivingStep = complete ? 3 : session ? 2 : 1;
+
+  return <div className="guided-app">
+    <header className="site-header">
+      <button className="brand" onClick={() => { if (mode === "choose") return; restart(); }} aria-label="LocalTransfer, voltar ao início"><span className="brand-icon"><ArrowLeftRight size={22} /></span><span>Local<strong>Transfer</strong></span></button>
+      <button className="help-button" onClick={() => setHelp(!help)} aria-expanded={help}><HelpCircle size={18} /><span>Como funciona</span></button>
+    </header>
+    <main className="guided-main">
+      {mode === "choose" ? <section className="welcome">
+        <div className="eyebrow"><span />SEM INSTALAR NADA</div>
+        <h1>O que você quer fazer?</h1>
+        <p className="lead">Envie fotos e arquivos entre o celular e o computador.<br />{" "}Escolha o que quer fazer <strong>neste aparelho</strong>.</p>
+        <div className="choice-grid">
+          <button className="choice-card send-choice" onClick={() => { setError(""); setMode("send"); }}><span className="choice-icon"><ArrowUpRight size={34} /></span><h2>Enviar arquivos</h2><p>Os arquivos estão aqui e quero<br />{" "}mandar para outro aparelho.</p><span className="choice-action">Escolher o que enviar<ArrowRight size={18} /></span></button>
+          <button className="choice-card receive-choice" onClick={() => { setError(""); setMode("receive"); }}><span className="choice-icon"><ArrowDownToLine size={30} /></span><h2>Receber arquivos</h2><p>Quero receber e salvar os arquivos<br />{" "}neste aparelho.</p><span className="choice-action">Digitar o código<ArrowRight size={18} /></span></button>
+        </div>
+        <div className="example"><span className="example-icon"><HelpCircle size={20} /></span><p><strong>Vai passar fotos do celular para o computador?</strong><br />{" "}No celular, escolha <b>Enviar</b>. No computador, escolha <b>Receber</b>.</p></div>
+      </section> : <section className="flow-page">
+        <button className="back-button" onClick={() => restart()}><ArrowLeft size={16} />Voltar ao início</button>
+        <div className="flow-title"><span className={`flow-icon ${mode}`} >{mode === "send" ? <ArrowUpRight size={27} /> : <ArrowDownToLine size={25} />}</span><div><div className="eyebrow">NESTE APARELHO</div><h1>{mode === "send" ? "Enviar arquivos" : "Receber arquivos"}</h1></div></div>
+        <ol className="steps" aria-label="Etapas da transferência">{(mode === "send" ? ["Escolher arquivos", "Compartilhar código", "Concluir envio"] : ["Digitar código", "Receber arquivos", "Salvar arquivos"]).map((label, index) => {
+          const activeStep = mode === "send" ? sendingStep : receivingStep;
+          return <li key={label} className={index + 1 === activeStep ? "current" : index + 1 < activeStep ? "done" : ""} aria-current={index + 1 === activeStep ? "step" : undefined}><span>{index + 1 < activeStep ? <Check size={13} /> : index + 1}</span>{label}</li>;
+        })}</ol>
+
+        {mode === "send" ? <>
+          <input ref={picker} className="sr-only" type="file" multiple aria-label="Escolher arquivos" onChange={e => { chooseFiles(e.target.files); e.target.value = ""; }} />
+          {!files.length ? <section className={`flow-card choose-files ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFiles(e.dataTransfer.files); }}>
+            <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 200 MB por vez · Você também pode arrastar os arquivos para cá.</small>
+          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{files.length} arquivo(s) chegaram ao outro aparelho.<br />{" "}Agora é só salvar por lá.</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
+            {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{connected ? (sending ? (progress ? "Enviando seus arquivos…" : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p><div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button><div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "O envio começa após a confirmação no outro aparelho.") : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
+            <div className="batch-summary"><FileIcon size={19} /><span><strong>{files.length} arquivo(s) selecionado(s)</strong><small>{size(total)}</small></span>{!connected && !loading && <button className="text-button" onClick={() => picker.current?.click()}>Adicionar mais<Plus size={14} /></button>}</div>
+            <details className="file-details"><summary>Ver arquivos selecionados</summary>{files.map((file, i) => <div className="file-line" key={`${file.name}-${i}`}><span>{file.name}</span><small>{size(file.size)}</small></div>)}</details>
+          </section>}
+        </> : <>
+          {!session ? <form className="flow-card receive-form" onSubmit={e => { e.preventDefault(); if (!loading) void join(); }}><span className="large-icon blue"><ArrowDownToLine size={34} /></span><h2>Qual é o código de envio?</h2><p>No outro aparelho, escolha <strong>Enviar arquivos</strong><br />{" "}e selecione o que deseja enviar. O código aparecerá lá.</p><label htmlFor="receive-code">Digite ou cole o código do outro aparelho</label><input id="receive-code" className="code-input" autoFocus value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z2-9\s-]/g, ""))} placeholder="ABCD EFGH" autoComplete="off" autoCapitalize="characters" spellCheck={false} maxLength={12} disabled={loading} /><button className="primary" type="submit" disabled={loading || code.replace(/[\s-]/g, "").length !== 8}>{loading ? <LoaderCircle className="spin" size={18} /> : <ArrowDownToLine size={18} />}{loading ? "Conectando…" : "Conectar e receber"}</button><small>Você confirma o recebimento antes de os arquivos chegarem.</small></form> : !complete && <section className="flow-card waiting-card"><span className={`large-icon ${connected ? "" : "blue"}`}>{connected ? <Check size={34} /> : <LoaderCircle className="spin" size={34} />}</span><h2>{connected ? "Conectado! Aguarde os arquivos." : state === "error" ? "Não conseguimos conectar." : "Conectando os aparelhos…"}</h2><p>{connected ? <>O pedido de recebimento vai aparecer aqui.<br />{" "}Quando aparecer, toque em <strong>Aceitar arquivos</strong>.</> : "Mantenha esta página aberta. Isso pode levar alguns segundos."}</p><div className="connection-note" role="status">{connected ? <LockKeyhole size={14} /> : null}{connected ? `Conexão com ${peer || "o outro aparelho"}` : status}</div><button className="text-button" onClick={() => { disconnect(); }}>Tentar outro código<ArrowLeft size={14} /></button></section>}
+          {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</p></div>}
+        </>}
+
+        {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
+        {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div><progress max={progress?.total || 1} value={progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Envio cancelado. Você pode tentar novamente."); }}>Cancelar transferência</button></section>}
+      </section>}
+
+      {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">Salve os arquivos antes de fechar esta página.</p>{received.map(file => <div className="download-row" key={file.id}><span className="file-icon"><FileIcon size={20} /></span><div><strong>{file.name}</strong><small>{size(file.size)}</small></div><a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a></div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
+
+      {help && <section className="help-panel"><div><h2>É simples: um envia, o outro recebe.</h2><button aria-label="Fechar ajuda" onClick={() => setHelp(false)}><X size={19} /></button></div><ol><li>No aparelho que tem os arquivos, escolha <strong>Enviar arquivos</strong> e selecione o que vai enviar.</li><li>No outro aparelho, abra este site e escolha <strong>Receber arquivos</strong>.</li><li>Digite o código mostrado por quem envia. Aceite o recebimento e salve os arquivos.</li></ol><p>Prefira o mesmo Wi-Fi. Mantenha as duas páginas abertas e o celular desbloqueado até terminar. São até 200 MB por vez. Algumas redes bloqueiam a conexão direta; se não conectar, tente outra rede.</p></section>}
+      <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
+    </main>
+    <footer className="site-footer"><span>LocalTransfer</span><span>Do seu aparelho para o outro.</span></footer>
+    {offer && <div className="modal-backdrop"><section className="receive-modal" role="dialog" aria-modal="true" aria-labelledby="receive-title"><span className="success-icon"><ArrowDownToLine size={30} /></span><span className="card-kicker">SEUS ARQUIVOS ESTÃO PRONTOS</span><h2 id="receive-title">Aceitar os arquivos<br />{" "}de {peer || "outro aparelho"}?</h2><p>{offer.files.length} arquivo(s) · {size(offer.files.reduce((n, file) => n + file.size, 0))}</p><div className="offer-files">{offer.files.map(file => <div key={file.id}><FileIcon size={16} /><span>{file.name}</span><small>{size(file.size)}</small></div>)}</div><button className="primary" autoFocus onClick={() => connection.current?.accept()}><Check size={18} />Aceitar arquivos</button><button className="text-button" onClick={() => connection.current?.reject()}>Não receber agora</button></section></div>}
+  </div>;
+}
+

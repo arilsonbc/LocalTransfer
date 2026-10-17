@@ -4,11 +4,13 @@ Transferência de fotos e arquivos entre iPhone, Android, Windows e outros compu
 
 ## Usar
 
-1. Abra o site nos dois aparelhos, preferencialmente no mesmo Wi-Fi.
-2. Crie uma sala no primeiro aparelho.
-3. No segundo, entre com o código de oito caracteres ou abra o link da sala.
-4. Escolha arquivos, envie e aceite no receptor.
-5. Toque em **Salvar** em cada arquivo recebido, antes de fechar a página.
+1. No aparelho que tem os arquivos, escolha **Enviar arquivos**.
+2. Toque em **Selecionar arquivos**. O código aparece automaticamente após a seleção.
+3. No outro aparelho, abra o mesmo site e escolha **Receber arquivos**.
+4. Digite ou cole o código e toque em **Conectar e receber**.
+5. Aceite os arquivos no receptor e toque em **Salvar** em cada um.
+
+O remetente não precisa apertar Enviar novamente: o pedido é iniciado automaticamente após a conexão. O receptor sempre confirma antes do início dos dados.
 
 Site: https://localtransfer-web.wise-sun-9588.chatgpt.site
 
@@ -71,4 +73,5 @@ Implementação web própria, inspirada no uso de transferência entre dispositi
 Referência: https://github.com/localsend/localsend (Apache-2.0).
 
 O código LocalTransfer está sob Apache-2.0. Avisos de licença do template Sites e das dependências estão preservados nos respectivos arquivos. Não há vínculo oficial com o projeto LocalSend.
+
 
