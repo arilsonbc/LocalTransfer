@@ -1,0 +1,11 @@
+LocalTransfer Web
+Copyright 2026 LocalTransfer contributors.
+
+This is an independent browser-based implementation inspired by the
+device-to-device file transfer use case of LocalSend.
+LocalSend upstream: https://github.com/localsend/localsend
+LocalTransfer is not affiliated with or endorsed by LocalSend.
+
+The Sites starter, build integration, and bundled component templates retain
+their original notices in build/sites-vite-plugin.LICENSE and vendor/.
+Dependency license notices remain with their respective packages.
