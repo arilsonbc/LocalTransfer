@@ -2,6 +2,7 @@
 
 import {useRef} from "react";
 import {ArrowLeftRight,ExternalLink,CodeXml,HelpCircle,Mail,X} from "lucide-react";
+import ThemeSwitch from "./theme-switch";
 
 const questions=[
   ["Como envio meus arquivos?","No aparelho com os arquivos, escolha Enviar arquivos e selecione o que deseja enviar. No outro aparelho, abra este site, escolha Receber arquivos e digite o código. Confirme o recebimento para começar."],
@@ -24,6 +25,7 @@ export default function TopBar({onHome}:{onHome:()=>void}) {
         <a className="nav-item" href="https://github.com/arilsonbc/LocalTransfer" target="_blank" rel="noopener noreferrer" aria-label="GitHub: código do LocalTransfer (abre em outra aba)"><CodeXml size={17}/><span>GitHub</span><ExternalLink className="external-icon" size={12}/></a>
         <button className="nav-item" onClick={()=>contact.current?.showModal()} aria-haspopup="dialog" aria-controls="contact-dialog"><Mail size={17}/><span>Contato</span></button>
       </nav>
+      <ThemeSwitch/>
     </div></header>
     <dialog ref={faq} id="faq-dialog" className="info-dialog" aria-labelledby="faq-title">
       <div className="dialog-heading"><div><span className="card-kicker">TIRE SUAS DÚVIDAS</span><h2 id="faq-title">Como funciona o LocalTransfer</h2></div><button className="icon-button" aria-label="Fechar perguntas frequentes" onClick={()=>faq.current?.close()} autoFocus><X size={21}/></button></div>

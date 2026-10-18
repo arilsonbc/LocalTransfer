@@ -16,7 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="pt-BR">
+    <html lang="pt-BR" suppressHydrationWarning>
+      <head><script id="localtransfer-theme" dangerouslySetInnerHTML={{__html:`try{var t=localStorage.getItem('localtransfer-theme');document.documentElement.dataset.theme=t==='light'||t==='dark'?t:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'}catch(e){document.documentElement.dataset.theme='light'}`}}/></head>
       <body className="antialiased">{children}</body>
     </html>
   );
