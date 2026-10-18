@@ -60,10 +60,11 @@ Testes automatizados de rotas usam armazenamento isolado em memória. O transpor
 
 ## Limitações
 
-- Até 500 arquivos e 200 MiB (apresentados como 200 MB na interface) por lote.
-- Os arquivos recebidos ficam na memória do navegador até serem salvos ou removidos. Mantenha a página aberta e o celular desbloqueado.
+- Até 500 arquivos e 100 GB decimais (100.000.000.000 bytes) por lote, inclusive um arquivo único de até 100 GB.
+- Lotes acima de 200 MiB exigem `showDirectoryPicker` no receptor (Chrome/Edge de computador). O receptor escolhe a pasta, e cada arquivo é gravado por fluxo em uma subpasta nova, com nomes numerados para evitar sobrescritas. O envio aguarda confirmação do receptor a cada 1 MiB, mantendo a fila de gravação limitada. É necessário espaço livre suficiente; falhas de gravação cancelam a transferência e abortam o arquivo atual.
+- Nos navegadores sem gravação direta, como Safari/iPhone e navegadores móveis sem o seletor, o limite de recebimento permanece em 200 MiB. Arquivos pequenos continuam na memória até salvar/remover. Esses dispositivos podem enviar arquivos maiores para um receptor compatível. Mantenha as páginas abertas e os aparelhos ativos.
 - Não há retomada após interrupções. No iPhone, salvar em Fotos pode exigir o menu de compartilhamento.
-- Para redes móveis e NAT restritivo, configure `CLOUDFLARE_TURN_KEY_ID` e `CLOUDFLARE_TURN_API_TOKEN` como variáveis de servidor na Vercel e faça um novo deploy. A rota autenticada `/api/rooms/[code]/ice` gera credenciais com validade de uma hora; a chave principal nunca vai ao navegador. Sem ambas as variáveis, apenas STUN fica disponível e a conexão entre algumas redes pode falhar. Uma configuração parcial ou falha da Cloudflare retorna erro explícito.
+- Para redes móveis e NAT restritivo, configure `CLOUDFLARE_TURN_KEY_ID` e `CLOUDFLARE_TURN_API_TOKEN` como variáveis de servidor na Vercel e faça um novo deploy. A rota autenticada `/api/rooms/[code]/ice` gera credenciais com validade de 48 horas para permitir transferências longas; a chave principal nunca vai ao navegador. O código da sala continua válido por 20 minutos para parear; uma transferência já conectada não depende da sala. Sem ambas as variáveis, apenas STUN fica disponível e a conexão entre algumas redes pode falhar. Uma configuração parcial ou falha da Cloudflare retorna erro explícito.
 - O TURN tem consumo de tráfego e franquia definidos pela Cloudflare. Credenciais temporárias limitam a exposição, mas não representam um limite financeiro. Verifique o consumo no painel da conta.
 - O código permite conectar o segundo participante. Compartilhe-o só com o receptor esperado e confira os arquivos antes de aceitar.
 - Não se conecta diretamente ao aplicativo LocalSend.

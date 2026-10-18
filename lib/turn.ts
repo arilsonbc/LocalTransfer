@@ -6,7 +6,8 @@ export async function generateIceServers(): Promise<RTCIceServer[]> {
   const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(key)}/credentials/generate-ice-servers`, {
     method:"POST", cache:"no-store", signal:AbortSignal.timeout(10000),
     headers:{Authorization:`Bearer ${token}`, "Content-Type":"application/json"},
-    body:JSON.stringify({ttl:3600}),
+    // A 100 GB transfer may take many hours on a mobile connection.
+    body:JSON.stringify({ttl:172800}),
   });
   if (!response.ok) throw new Error("TURN credentials unavailable");
   const data = await response.json() as {iceServers?:RTCIceServer[]};

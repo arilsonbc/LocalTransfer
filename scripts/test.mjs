@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
+import {createHash} from 'node:crypto';
 import ts from 'typescript';
 
 function source(file, replacements={}) {
@@ -11,7 +12,9 @@ function source(file, replacements={}) {
 }
 const serviceUrl=source('lib/room-service.ts');
 const service=await import(serviceUrl);
-const transfer=await import(source('lib/transfer.ts'));
+const transferUrl=source('lib/transfer.ts');
+const transfer=await import(transferUrl);
+const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
 const records=new Map(),counts=new Map();
 const db={
   async create(row){if(records.has(row.code))return false;records.set(row.code,structuredClone(row));return true;},
@@ -92,7 +95,7 @@ test('TURN exige sala autenticada, gera credenciais temporárias e protege o seg
       calls++;
       assert.equal(url,'https://rtc.live.cloudflare.com/v1/turn/keys/test-key/credentials/generate-ice-servers');
       assert.equal(options.headers.Authorization,'Bearer server-secret');
-      assert.deepEqual(JSON.parse(options.body),{ttl:3600});
+      assert.deepEqual(JSON.parse(options.body),{ttl:172800});
       return Response.json({iceServers:[{urls:['turn:turn.cloudflare.com:53','turns:turn.cloudflare.com:443?transport=tcp'],username:'temporary-user',credential:'temporary-password'}]}, {status:201});
     };
     assert.equal((await ice.POST(request('/','POST'),context(host.code))).status,401);
@@ -158,13 +161,13 @@ class MockChannel extends EventTarget {
   }
   close(){this.readyState='closed';this.dispatchEvent(new Event('close'));}
 }
-function pair(accept=true){
+function pair(accept=true,sink){
   globalThis.RTCPeerConnection=MockPeer;
   const blobs=[],errors=[],completions=[];
   const hooks={state(){},peer(){},offer(){},progress(){},file(info,blob){blobs.push({info,blob});},complete(direction,count){completions.push({direction,count});},error(e){errors.push(e);}};
   const session={code:'ABCDEFGH',token:'a'.repeat(64),role:'host',expiresAt:Date.now()+10000};
   const left=new transfer.TransferConnection(session,hooks);
-  const right=new transfer.TransferConnection({...session,role:'guest'},{...hooks,offer(value){if(value)queueMicrotask(()=>accept?right.accept():right.reject());}});
+  const right=new transfer.TransferConnection({...session,role:'guest'},{...hooks,offer(value){if(value)queueMicrotask(()=>accept?right.accept(sink):right.reject());}});
   const lc=new MockChannel(),rc=new MockChannel();lc.peer=rc;rc.peer=lc;
   left.bind(lc);right.bind(rc);
   return {left,right,blobs,errors,completions};
@@ -192,4 +195,75 @@ test('blocos não autorizados são recusados',async()=>{
   const p=pair();
   await assert.rejects(()=>p.right.message(new ArrayBuffer(10)),/sem autorização/);
   assert.equal(p.blobs.length,0);p.left.close();p.right.close();
+});
+
+test('limite de 100 GB é exato por arquivo e pelo total do lote',()=>{
+  assert.equal(transfer.MAX_BATCH,100_000_000_000);
+  const file={id:'1',name:'grande.bin',size:transfer.MAX_BATCH,type:''};
+  assert.equal(transfer.validateOffer({id:'batch',files:[file]}),true);
+  assert.equal(transfer.validateOffer({id:'batch',files:[{...file,size:file.size+1}]}),false);
+  assert.equal(transfer.validateOffer({id:'batch',files:[file,{...file,id:'2',size:1}]}),false);
+});
+
+test('arquivo acima de 200 MB é gravado em fluxo com memória limitada e confirmação do disco',async()=>{
+  const size=transfer.MAX_MEMORY+37;
+  let bytes=0,closed=false,writes=0,maxQueued=0;
+  const sentHash=createHash('sha256'),receivedHash=createHash('sha256');
+  const p=pair(true,async()=>({
+    async write(chunk){receivedHash.update(new Uint8Array(chunk));bytes+=chunk.byteLength;writes++;assert.ok(chunk.byteLength<=transfer.CHUNK_SIZE);assert.equal(p.right.receiving.chunks.length,0);maxQueued=Math.max(maxQueued,p.right.queuedBytes);},
+    async close(){closed=true;assert.equal(bytes,size);},
+    async abort(){},
+  }));
+  // Generate each block lazily: no 200 MB test buffer is allocated.
+  const file={name:'grande.bin',size,type:'application/octet-stream',slice(start,end){return {async arrayBuffer(){const chunk=new Uint8Array(Math.min(end,size)-start).fill((start/transfer.CHUNK_SIZE)%251);sentHash.update(chunk);return chunk.buffer;}};}};
+  try {
+    await p.left.send([file]);await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(bytes,size);assert.ok(closed);assert.ok(writes>1000);
+    assert.equal(sentHash.digest('hex'),receivedHash.digest('hex'));
+    assert.equal(p.blobs[0].blob,null);
+    assert.ok(maxQueued<=transfer.FLOW_WINDOW+1024);
+    assert.ok(p.completions.some(c=>c.direction==='receive'));
+  } finally {p.left.close();p.right.close();}
+});
+
+test('destino em disco cria subpasta e nomes seguros sem sobrescrever arquivos existentes',async()=>{
+  const originalWindow=globalThis.window;
+  const folders=[],names=[],writes=[];
+  let closed=false,aborted=false;
+  globalThis.window={async showDirectoryPicker(options){
+    assert.deepEqual(options,{mode:'readwrite'});
+    return {async getDirectoryHandle(name,options){
+      assert.deepEqual(options,{create:true});folders.push(name);
+      return {async getFileHandle(name){names.push(name);return {async createWritable(){return {async write(value){writes.push(value.byteLength);},async close(){closed=true;},async abort(){aborted=true;}};}};}};
+    }};
+  }};
+  try {
+    assert.ok(disk.canSaveToDisk());
+    const folder=await disk.chooseReceiveFolder();
+    const sink=await folder.open({name:'../../foto.jpg',size:3},0);
+    await sink.write(new ArrayBuffer(3));await sink.close();
+    const other=await folder.open({name:'../../foto.jpg',size:3},1);await other.abort();
+    assert.equal(folders.length,1);assert.match(folders[0],/^LocalTransfer-/);
+    assert.deepEqual(names,['001-__.._foto.jpg','002-__.._foto.jpg']);
+    assert.deepEqual(writes,[3]);assert.ok(closed&&aborted);
+  } finally {globalThis.window=originalWindow;}
+});
+
+test('sem destino em disco, lote grande é recusado antes de enviar dados',async()=>{
+  const p=pair();
+  try {
+    await assert.rejects(()=>p.left.send([{name:'grande.bin',size:transfer.MAX_MEMORY+1,type:''}]),/recusado/);
+    assert.equal(p.blobs.length,0);
+    assert.ok(p.errors.some(e=>e.includes('Chrome ou Edge')));
+  } finally {p.left.close();p.right.close();}
+});
+
+test('falha de gravação cancela envio e aborta o arquivo parcial',async()=>{
+  let aborted=false;
+  const p=pair(true,async()=>({async write(){throw new Error('Disco cheio');},async close(){throw new Error('Não deveria concluir');},async abort(){aborted=true;}}));
+  try {
+    await assert.rejects(()=>p.left.send([new File([new Uint8Array(transfer.FLOW_WINDOW)],'arquivo.bin')]),/cancelada/);
+    assert.ok(aborted);assert.equal(p.blobs.length,0);
+    assert.ok(p.errors.some(e=>e.includes('Disco cheio')));
+  } finally {p.left.close();p.right.close();}
 });

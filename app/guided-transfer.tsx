@@ -2,12 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Check, CheckCheck, Copy, File as FileIcon, HelpCircle, LoaderCircle, LockKeyhole, Plus, ShieldCheck, UploadCloud, X } from "lucide-react";
-import { api, MAX_BATCH, MAX_FILES, safeFilename, TransferConnection, type FileInfo, type Offer, type Session } from "../lib/transfer";
+import { api, MAX_BATCH, MAX_MEMORY, MAX_FILES, safeFilename, TransferConnection, type FileInfo, type Offer, type Session } from "../lib/transfer";
+import {canSaveToDisk,chooseReceiveFolder} from "../lib/disk-receiver";
 
 type Mode = "choose" | "send" | "receive";
-type Received = FileInfo & { url: string };
+type Received = FileInfo & { url: string|null };
 type Progress = { name: string; current: number; total: number; direction: string };
-const size = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const size = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1_000_000_000 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1_000_000_000).toFixed(1)} GB`;
 const prettyCode = (code: string) => `${code.slice(0, 4)} ${code.slice(4)}`;
 
 export default function GuidedTransfer() {
@@ -29,6 +30,9 @@ export default function GuidedTransfer() {
   const [complete, setComplete] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [help, setHelp] = useState(false);
+  const [diskSupported,setDiskSupported]=useState(false);
+  const [destination,setDestination]=useState("");
+  const [choosingFolder,setChoosingFolder]=useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const connection = useRef<TransferConnection | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -41,6 +45,7 @@ export default function GuidedTransfer() {
 
   useEffect(() => {
     const ua = navigator.userAgent;
+    setDiskSupported(canSaveToDisk());
     setName(/iPhone|iPad/i.test(ua) ? "iPhone / iPad" : /Android/i.test(ua) ? "Android" : /Macintosh/i.test(ua) ? "Mac" : "Computador");
     const invite = new URLSearchParams(location.hash.slice(1)).get("sala");
     if (invite) { setMode("receive"); setCode(invite.slice(0, 12)); }
@@ -81,7 +86,8 @@ export default function GuidedTransfer() {
       peer: value => { if (active()) setPeer(value); },
       offer: incoming => {
         if (!active()) return;
-        if (incoming && retainedBytes.current + incoming.files.reduce((n, f) => n + f.size, 0) > MAX_BATCH) {
+        const incomingSize=incoming?.files.reduce((n,f)=>n+f.size,0)||0;
+        if (incoming && incomingSize<=MAX_MEMORY && retainedBytes.current + incomingSize > MAX_MEMORY) {
           queueMicrotask(() => connection.current?.reject());
           setError("Salve os arquivos que já chegaram e toque em Limpar lista antes de receber mais."); return;
         }
@@ -90,7 +96,8 @@ export default function GuidedTransfer() {
       progress: (fileName, current, fileTotal, direction) => { if (active()) setProgress({ name: fileName, current, total: fileTotal, direction }); },
       file: (info, blob) => {
         if (!active()) return;
-        const url = URL.createObjectURL(blob); urls.current.push(url); retainedBytes.current += blob.size;
+        const url = blob?URL.createObjectURL(blob):null;
+        if(url && blob){urls.current.push(url);retainedBytes.current+=blob.size;}
         setReceived(old => [...old, { ...info, name: safeFilename(info.name), url }]);
       },
       complete: (direction, count) => {
@@ -117,7 +124,7 @@ export default function GuidedTransfer() {
     const next = [...files];
     for (const f of Array.from(list)) if (!next.some(old => old.name === f.name && old.size === f.size && old.lastModified === f.lastModified)) next.push(f);
     if (next.length > MAX_FILES || next.reduce((n, f) => n + f.size, 0) > MAX_BATCH) {
-      setError("Escolha até 500 arquivos e 200 MB por vez. Você pode enviar outros depois."); return;
+      setError("Escolha até 500 arquivos e 100 GB por vez. Você pode enviar outros depois."); return;
     }
     setFiles(next); setError(""); setComplete(false);
     if (!sessionRef.current && !loading) void createCode();
@@ -161,6 +168,21 @@ export default function GuidedTransfer() {
     urls.current.forEach(u => URL.revokeObjectURL(u)); urls.current = []; retainedBytes.current = 0; setReceived([]);
   }
 
+  async function acceptOffer() {
+    const conn=connection.current;
+    if(!conn || !offer || choosingFolder)return;
+    const currentEpoch=epoch.current;
+    if(offer.files.reduce((n,file)=>n+file.size,0)<=MAX_MEMORY){setDestination("");conn.accept();return;}
+    setChoosingFolder(true);setError("");
+    try {
+      const folder=await chooseReceiveFolder();
+      if(epoch.current!==currentEpoch || connection.current!==conn || !conn.busy)return;
+      setDestination(folder.name);conn.accept(folder.open,offer.id);
+    } catch(e) {
+      if(epoch.current===currentEpoch && !(e instanceof DOMException && e.name==="AbortError"))setError("Não foi possível abrir a pasta. Escolha uma pasta em que você possa salvar arquivos e tente novamente.");
+    } finally {setChoosingFolder(false);}
+  }
+
   async function copyCode() {
     if (!session) return;
     try { await navigator.clipboard.writeText(session.code); setCopied(true); setTimeout(() => setCopied(false), 2500); }
@@ -169,6 +191,7 @@ export default function GuidedTransfer() {
 
   const sendingStep = complete ? 3 : session ? 2 : 1;
   const receivingStep = complete ? 3 : session ? 2 : 1;
+  const largeOffer=!!offer && offer.files.reduce((n,file)=>n+file.size,0)>MAX_MEMORY;
 
   return <div className="guided-app">
     <header className="site-header">
@@ -196,28 +219,28 @@ export default function GuidedTransfer() {
         {mode === "send" ? <>
           <input ref={picker} className="sr-only" type="file" multiple aria-label="Escolher arquivos" onChange={e => { chooseFiles(e.target.files); e.target.value = ""; }} />
           {!files.length ? <section className={`flow-card choose-files ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFiles(e.dataTransfer.files); }}>
-            <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 200 MB por vez · Você também pode arrastar os arquivos para cá.</small>
-          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{files.length} arquivo(s) chegaram ao outro aparelho.<br />{" "}Agora é só salvar por lá.</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
+            <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 100 GB por vez · Para receber mais de 200 MB, use Chrome ou Edge no computador.</small>
+          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{files.length} arquivo(s) chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
             {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{connected ? (sending ? (progress ? "Enviando seus arquivos…" : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p><div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button><div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "O envio começa após a confirmação no outro aparelho.") : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
             <div className="batch-summary"><FileIcon size={19} /><span><strong>{files.length} arquivo(s) selecionado(s)</strong><small>{size(total)}</small></span>{!connected && !loading && <button className="text-button" onClick={() => picker.current?.click()}>Adicionar mais<Plus size={14} /></button>}</div>
             <details className="file-details"><summary>Ver arquivos selecionados</summary>{files.map((file, i) => <div className="file-line" key={`${file.name}-${i}`}><span>{file.name}</span><small>{size(file.size)}</small></div>)}</details>
           </section>}
         </> : <>
           {!session ? <form className="flow-card receive-form" onSubmit={e => { e.preventDefault(); if (!loading) void join(); }}><span className="large-icon blue"><ArrowDownToLine size={34} /></span><h2>Qual é o código de envio?</h2><p>No outro aparelho, escolha <strong>Enviar arquivos</strong><br />{" "}e selecione o que deseja enviar. O código aparecerá lá.</p><label htmlFor="receive-code">Digite ou cole o código do outro aparelho</label><input id="receive-code" className="code-input" autoFocus value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z2-9\s-]/g, ""))} placeholder="ABCD EFGH" autoComplete="off" autoCapitalize="characters" spellCheck={false} maxLength={12} disabled={loading} /><button className="primary" type="submit" disabled={loading || code.replace(/[\s-]/g, "").length !== 8}>{loading ? <LoaderCircle className="spin" size={18} /> : <ArrowDownToLine size={18} />}{loading ? "Conectando…" : "Conectar e receber"}</button><small>Você confirma o recebimento antes de os arquivos chegarem.</small></form> : !complete && <section className="flow-card waiting-card"><span className={`large-icon ${connected ? "" : "blue"}`}>{connected ? <Check size={34} /> : <LoaderCircle className="spin" size={34} />}</span><h2>{connected ? "Conectado! Aguarde os arquivos." : state === "error" ? "Não conseguimos conectar." : "Conectando os aparelhos…"}</h2><p>{connected ? <>O pedido de recebimento vai aparecer aqui.<br />{" "}Quando aparecer, toque em <strong>Aceitar arquivos</strong>.</> : "Mantenha esta página aberta. Isso pode levar alguns segundos."}</p><div className="connection-note" role="status">{connected ? <LockKeyhole size={14} /> : null}{connected ? `Conexão com ${peer || "o outro aparelho"}` : status}</div><button className="text-button" onClick={() => { disconnect(); }}>Tentar outro código<ArrowLeft size={14} /></button></section>}
-          {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</p></div>}
+          {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>{destination ? <>Arquivos salvos na pasta <strong>{destination}</strong>.</> : <>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</>}</p></div>}
         </>}
 
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div><progress max={progress?.total || 1} value={progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Envio cancelado. Você pode tentar novamente."); }}>Cancelar transferência</button></section>}
       </section>}
 
-      {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">Salve os arquivos antes de fechar esta página.</p>{received.map(file => <div className="download-row" key={file.id}><span className="file-icon"><FileIcon size={20} /></span><div><strong>{file.name}</strong><small>{size(file.size)}</small></div><a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a></div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
+      {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">{received.some(file=>file.url) ? "Salve os arquivos antes de fechar esta página." : "Os arquivos já foram gravados na pasta escolhida."}</p>{received.map(file => <div className="download-row" key={file.id}><span className="file-icon"><FileIcon size={20} /></span><div><strong>{file.name}</strong><small>{size(file.size)}</small></div>{file.url ? <a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a> : <span className="secondary"><Check size={16} />Salvo na pasta</span>}</div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
 
-      {help && <section className="help-panel"><div><h2>É simples: um envia, o outro recebe.</h2><button aria-label="Fechar ajuda" onClick={() => setHelp(false)}><X size={19} /></button></div><ol><li>No aparelho que tem os arquivos, escolha <strong>Enviar arquivos</strong> e selecione o que vai enviar.</li><li>No outro aparelho, abra este site e escolha <strong>Receber arquivos</strong>.</li><li>Digite o código mostrado por quem envia. Aceite o recebimento e salve os arquivos.</li></ol><p>Prefira o mesmo Wi-Fi. Mantenha as duas páginas abertas e o celular desbloqueado até terminar. São até 200 MB por vez. Algumas redes bloqueiam a conexão direta; se não conectar, tente outra rede.</p></section>}
+      {help && <section className="help-panel"><div><h2>É simples: um envia, o outro recebe.</h2><button aria-label="Fechar ajuda" onClick={() => setHelp(false)}><X size={19} /></button></div><ol><li>No aparelho que tem os arquivos, escolha <strong>Enviar arquivos</strong> e selecione o que vai enviar.</li><li>No outro aparelho, abra este site e escolha <strong>Receber arquivos</strong>.</li><li>Digite o código mostrado por quem envia. Aceite o recebimento e salve os arquivos.</li></ol><p>Você pode usar Wi-Fi ou rede móvel. Envie até 100 GB por vez. Para receber mais de 200 MB, abra o site no Chrome ou Edge do computador e escolha uma pasta com espaço suficiente. Nos navegadores sem essa opção, o recebimento continua limitado a 200 MB. Mantenha as duas páginas abertas e os aparelhos ativos até terminar. Se a conexão cair, será necessário reenviar.</p></section>}
       <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
     </main>
     <footer className="site-footer"><span>LocalTransfer</span><span>Do seu aparelho para o outro.</span></footer>
-    {offer && <div className="modal-backdrop"><section className="receive-modal" role="dialog" aria-modal="true" aria-labelledby="receive-title"><span className="success-icon"><ArrowDownToLine size={30} /></span><span className="card-kicker">SEUS ARQUIVOS ESTÃO PRONTOS</span><h2 id="receive-title">Aceitar os arquivos<br />{" "}de {peer || "outro aparelho"}?</h2><p>{offer.files.length} arquivo(s) · {size(offer.files.reduce((n, file) => n + file.size, 0))}</p><div className="offer-files">{offer.files.map(file => <div key={file.id}><FileIcon size={16} /><span>{file.name}</span><small>{size(file.size)}</small></div>)}</div><button className="primary" autoFocus onClick={() => connection.current?.accept()}><Check size={18} />Aceitar arquivos</button><button className="text-button" onClick={() => connection.current?.reject()}>Não receber agora</button></section></div>}
+    {offer && <div className="modal-backdrop"><section className="receive-modal" role="dialog" aria-modal="true" aria-labelledby="receive-title"><span className="success-icon"><ArrowDownToLine size={30} /></span><span className="card-kicker">SEUS ARQUIVOS ESTÃO PRONTOS</span><h2 id="receive-title">Aceitar os arquivos<br />{" "}de {peer || "outro aparelho"}?</h2><p>{offer.files.length} arquivo(s) · {size(offer.files.reduce((n, file) => n + file.size, 0))}</p><div className="offer-files">{offer.files.map(file => <div key={file.id}><FileIcon size={16} /><span>{file.name}</span><small>{size(file.size)}</small></div>)}</div>{largeOffer && <p>{diskSupported ? "Escolha uma pasta com espaço livre. Os arquivos serão gravados nela durante o recebimento." : "Para receber mais de 200 MB, abra este site no Chrome ou Edge de um computador. Este navegador não permite salvar diretamente em uma pasta."}</p>}<button className="primary" autoFocus disabled={choosingFolder || (largeOffer && !diskSupported)} onClick={() => void acceptOffer()}>{choosingFolder ? <LoaderCircle className="spin" size={18} /> : <Check size={18} />}{choosingFolder ? "Abrindo pasta…" : largeOffer ? "Escolher pasta e receber" : "Aceitar arquivos"}</button><button className="text-button" disabled={choosingFolder} onClick={() => connection.current?.reject()}>Não receber agora</button></section></div>}
   </div>;
 }
 

@@ -1,6 +1,10 @@
-export const MAX_BATCH = 200 * 1024 * 1024;
+export const MAX_BATCH = 100_000_000_000;
+export const MAX_MEMORY = 200 * 1024 * 1024;
 export const MAX_FILES = 500;
 export const CHUNK_SIZE = 16 * 1024;
+export const FLOW_WINDOW = 1024 * 1024;
+export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Promise<void>;abort:()=>Promise<void>};
+export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string};
 export type Offer = {id:string;files:FileInfo[]};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
@@ -9,7 +13,7 @@ type Hooks = {
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
   progress:(name:string,current:number,total:number,direction:"send"|"receive")=>void;
-  file:(file:FileInfo,blob:Blob)=>void;
+  file:(file:FileInfo,blob:Blob|null)=>void;
   complete:(direction:"send"|"receive",count:number)=>void;
   error:(message:string)=>void;
 };
@@ -35,12 +39,18 @@ export class TransferConnection {
   private connectTimer:ReturnType<typeof setTimeout>|null=null;
   private incoming:Offer|null=null;
   private accepted=false;
-  private receiving:{info:FileInfo;chunks:ArrayBuffer[];bytes:number}|null=null;
+  private receiving:{info:FileInfo;chunks:ArrayBuffer[];bytes:number;sink:ReceiveSink|null}|null=null;
+  private sinkFactory:SinkFactory|null=null;
+  private transferEpoch=0;
+  private peerFlow=false;
+  private incomingFlow=false;
   private receiveIndex=0;
   private outgoing=false;
   private cancelled=false;
   private pending=new Map<string,{resolve:()=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   private queue=Promise.resolve();
+  private queuedBytes=0;
+  private lastProgressAt=0;
   constructor(private session:Session,private hooks:Hooks) {}
   private createPeer(iceServers:RTCIceServer[]) {
     this.pc=new RTCPeerConnection({iceServers});
@@ -53,6 +63,10 @@ export class TransferConnection {
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
+  private progress(name:string,current:number,total:number,direction:"send"|"receive") {
+    const now=Date.now();
+    if(current===0 || current===total || now-this.lastProgressAt>=100){this.lastProgressAt=now;this.hooks.progress(name,current,total,direction);}
+  }
   async start() {
     try {
       this.hooks.state("connecting","Preparando conexão segura…");
@@ -117,7 +131,10 @@ export class TransferConnection {
     channel.onclose=()=>{if(!this.stopped)this.fail("O outro aparelho desconectou. Crie outra sala para continuar.");};
     channel.onerror=()=>{if(!this.stopped)this.fail("A transferência foi interrompida. Reconecte os aparelhos.");};
     channel.onmessage=event=>{
-      this.queue=this.queue.then(()=>this.message(event.data)).catch(e=>{this.cancel();this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");});
+      const bytes=typeof event.data==="string"?event.data.length*2:event.data instanceof Blob?event.data.size:event.data.byteLength;
+      this.queuedBytes+=bytes;
+      if(this.queuedBytes>4*FLOW_WINDOW){this.fail("O envio excedeu a velocidade de gravação. Tente novamente.");return;}
+      this.queue=this.queue.then(()=>{if(!this.stopped)return this.message(event.data);}).catch(e=>{this.cancel();this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");}).finally(()=>{this.queuedBytes-=bytes;});
     };
   }
   private control(value:unknown) {
@@ -138,42 +155,57 @@ export class TransferConnection {
       if(!r || !this.accepted)throw new Error("Arquivo recebido sem autorização.");
       const chunk=data instanceof Blob?await data.arrayBuffer():data;
       if(chunk.byteLength>CHUNK_SIZE || r.bytes+chunk.byteLength>r.info.size)throw new Error("Tamanho de arquivo inválido.");
-      r.chunks.push(chunk);r.bytes+=chunk.byteLength;
-      this.hooks.progress(r.info.name,r.bytes,r.info.size,"receive");
+      if(r.sink)await r.sink.write(chunk);else r.chunks.push(chunk);
+      if(this.receiving!==r)return;
+      r.bytes+=chunk.byteLength;
+      this.progress(r.info.name,r.bytes,r.info.size,"receive");
+      if(this.incomingFlow && (r.bytes%FLOW_WINDOW===0 || r.bytes===r.info.size))this.control({type:"flow",id:r.info.id,bytes:r.bytes});
       return;
     }
     if(data.length>350000)throw new Error("Solicitação muito grande.");
     const msg=JSON.parse(data);
     switch(msg.type) {
       case "offer": {
-        if(!validateOffer(msg.offer) || this.busy) {this.control({type:"reject",reason:this.busy?"O aparelho está ocupado.":"Lote inválido ou maior que 200 MB."});return;}
-        this.incoming=msg.offer;this.accepted=false;this.receiveIndex=0;
+        if(!validateOffer(msg.offer) || this.busy) {this.control({type:"reject",reason:this.busy?"O aparelho está ocupado.":"Lote inválido ou maior que 100 GB."});return;}
+        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.accepted=false;this.receiveIndex=0;
         this.hooks.offer(this.incoming);return;
       }
-      case "accept": this.resolve("accept");return;
+      case "accept": this.peerFlow=msg.flowControl===1;this.resolve("accept");return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
         const info=this.incoming?.files[this.receiveIndex];
         if(!this.accepted || this.receiving || !info || msg.id!==info.id)throw new Error("Sequência de arquivos inválida.");
-        this.receiving={info,chunks:[],bytes:0};this.hooks.progress(info.name,0,info.size,"receive");return;
+        const epoch=this.transferEpoch;
+        const sink=this.sinkFactory?await this.sinkFactory(info,this.receiveIndex):null;
+        if(this.stopped || epoch!==this.transferEpoch){await sink?.abort().catch(()=>{});return;}
+        this.receiving={info,chunks:[],bytes:0,sink};this.progress(info.name,0,info.size,"receive");return;
       }
       case "file-end": {
         const r=this.receiving;
         if(!r || msg.id!==r.info.id || r.bytes!==r.info.size)throw new Error("Arquivo incompleto. Envie novamente.");
-        this.hooks.file(r.info,new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}));
+        if(r.sink)await r.sink.close();
+        if(this.receiving!==r)return;
+        this.hooks.file(r.info,r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}));
         this.receiving=null;this.receiveIndex++;this.control({type:"ack",id:msg.id});return;
       }
       case "ack": this.resolve(`ack:${msg.id}`);return;
+      case "flow": if(typeof msg.id==="string" && Number.isSafeInteger(msg.bytes))this.resolve(`flow:${msg.id}:${msg.bytes}`);return;
       case "done": {
         if(!this.incoming || !this.accepted || this.receiving || this.receiveIndex!==this.incoming.files.length)throw new Error("Transferência incompleta.");
-        const count=this.incoming.files.length;this.incoming=null;this.accepted=false;this.hooks.offer(null);this.hooks.complete("receive",count);return;
+        const count=this.incoming.files.length;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.hooks.complete("receive",count);return;
       }
       case "cancel": this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
     }
   }
-  accept() {
-    if(!this.incoming)return;
-    this.accepted=true;this.hooks.offer(null);this.control({type:"accept"});
+  accept(sinkFactory?:SinkFactory,offerId?:string) {
+    if(!this.incoming || (offerId && this.incoming.id!==offerId))return;
+    const total=this.incoming.files.reduce((n,file)=>n+file.size,0);
+    if(total>MAX_MEMORY && (!sinkFactory || !this.incomingFlow)){
+      const message=!sinkFactory?"Para receber mais de 200 MB, escolha uma pasta usando Chrome ou Edge no computador.":"Atualize o site no aparelho que envia para transferir arquivos grandes.";
+      this.reject();this.hooks.error(message);return;
+    }
+    this.sinkFactory=sinkFactory||null;
+    this.accepted=true;this.hooks.offer(null);this.control({type:"accept",flowControl:this.incomingFlow?1:0});
   }
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
@@ -193,10 +225,10 @@ export class TransferConnection {
   async send(files:File[]) {
     if(this.busy)throw new Error("Aguarde a transferência atual terminar.");
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
-    if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 200 MB por lote.");
-    this.outgoing=true;this.cancelled=false;
+    if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
+    this.outgoing=true;this.cancelled=false;this.peerFlow=false;
     try {
-      const accept=this.wait("accept");this.control({type:"offer",offer});
+      const accept=this.wait("accept",600000);this.control({type:"offer",offer,flowControl:1});
       await accept;
       for(let i=0;i<files.length;i++) {
         const file=files[i],info=offer.files[i];
@@ -206,8 +238,11 @@ export class TransferConnection {
           const chunk=await file.slice(offset,offset+CHUNK_SIZE).arrayBuffer();
           await this.drain();
           if(this.cancelled)throw new Error("Transferência cancelada.");
+          const current=Math.min(offset+chunk.byteLength,file.size);
+          const confirmation=this.peerFlow && (current%FLOW_WINDOW===0 || current===file.size)?this.wait(`flow:${info.id}:${current}`,120000):null;
           this.channel!.send(chunk);
-          this.hooks.progress(file.name,Math.min(offset+chunk.byteLength,file.size),file.size,"send");
+          if(confirmation)await confirmation;
+          this.progress(file.name,current,file.size,"send");
         }
         const ack=this.wait(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id});await ack;
       }
@@ -218,7 +253,8 @@ export class TransferConnection {
     } finally {this.outgoing=false;}
   }
   private resetTransfer() {
-    this.cancelled=true;this.receiving=null;this.incoming=null;this.accepted=false;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
+    this.transferEpoch++;
+    this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
   }
   cancel() {if(this.channel?.readyState==="open")this.control({type:"cancel"});this.resetTransfer();}
   private fail(message:string) {if(this.stopped)return;this.close();this.hooks.state("error",message);this.hooks.error(message);}
