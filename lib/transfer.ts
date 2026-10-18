@@ -28,7 +28,7 @@ export async function api<T=Record<string,unknown>>(path:string,method="GET",dat
 }
 
 export class TransferConnection {
-  private pc:RTCPeerConnection;
+  private pc!:RTCPeerConnection;
   private channel:RTCDataChannel|null=null;
   private stopped=false;
   private pollTimer:ReturnType<typeof setTimeout>|null=null;
@@ -41,8 +41,9 @@ export class TransferConnection {
   private cancelled=false;
   private pending=new Map<string,{resolve:()=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   private queue=Promise.resolve();
-  constructor(private session:Session,private hooks:Hooks) {
-    this.pc=new RTCPeerConnection();
+  constructor(private session:Session,private hooks:Hooks) {}
+  private createPeer(iceServers:RTCIceServer[]) {
+    this.pc=new RTCPeerConnection({iceServers});
     this.pc.ondatachannel=e=>this.bind(e.channel);
     this.pc.onconnectionstatechange=()=>{
       if(this.stopped) return;
@@ -57,7 +58,7 @@ export class TransferConnection {
       this.hooks.state("connecting","Preparando conexão segura…");
       const config=await api<{iceServers:RTCIceServer[]}>(`/api/rooms/${this.session.code}/ice`,"POST",{},this.session.token);
       if(this.stopped) return;
-      this.pc.setConfiguration({iceServers:config.iceServers});
+      this.createPeer(config.iceServers);
       if(this.session.role==="host") {
         this.bind(this.pc.createDataChannel("localtransfer-files",{ordered:true}));
         await this.pc.setLocalDescription(await this.pc.createOffer());
@@ -225,6 +226,6 @@ export class TransferConnection {
     this.stopped=true;
     if(this.pollTimer)clearTimeout(this.pollTimer);
     if(this.connectTimer)clearTimeout(this.connectTimer);
-    this.resetTransfer();this.channel?.close();this.pc.close();
+    this.resetTransfer();this.channel?.close();this.pc?.close();
   }
 }

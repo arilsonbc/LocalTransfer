@@ -121,6 +121,28 @@ test('TURN exige sala autenticada, gera credenciais temporárias e protege o seg
 
 // Transport simulation exercises framing and backpressure independently of
 // network conditions. Real WebRTC is additionally verified in two browser tabs.
+test('credenciais TURN são carregadas antes da criação da conexão WebRTC',async()=>{
+  const originalFetch=globalThis.fetch;
+  const originalPeer=globalThis.RTCPeerConnection;
+  const configs=[],errors=[];
+  const servers=[{urls:'turns:turn.cloudflare.com:443?transport=tcp',username:'temporary-user',credential:'temporary-password'}];
+  globalThis.RTCPeerConnection=class {
+    connectionState='new';
+    constructor(config){configs.push(config);}
+    close(){}
+  };
+  globalThis.fetch=async path=>Response.json(path.endsWith('/ice')?{iceServers:servers}:{joined:false,description:null});
+  const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(e){errors.push(e);}};
+  const session={code:'ABCDEFGH',token:'a'.repeat(64),role:'guest',expiresAt:Date.now()+10000};
+  const connection=new transfer.TransferConnection(session,hooks);
+  try {
+    assert.equal(configs.length,0);
+    await connection.start();
+    assert.deepEqual(configs,[{iceServers:servers}]);
+    assert.deepEqual(errors,[]);
+  } finally {connection.close();globalThis.fetch=originalFetch;globalThis.RTCPeerConnection=originalPeer;}
+});
+
 class MockPeer {close(){};}
 class MockChannel extends EventTarget {
   readyState='open';bufferedAmount=0;bufferedAmountLowThreshold=65536;peer=null;
