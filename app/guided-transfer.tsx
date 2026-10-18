@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Check, CheckCheck, Copy, File as FileIcon, HelpCircle, LoaderCircle, LockKeyhole, Plus, ShieldCheck, UploadCloud, X } from "lucide-react";
 import { api, MAX_BATCH, MAX_MEMORY, MAX_FILES, safeFilename, TransferConnection, type FileInfo, type Offer, type Session } from "../lib/transfer";
 import {canSaveToDisk,chooseReceiveFolder} from "../lib/disk-receiver";
+import TopBar from "./top-bar";
 
 type Mode = "choose" | "send" | "receive";
 type Received = FileInfo & { url: string|null };
@@ -29,7 +30,7 @@ export default function GuidedTransfer() {
   const [copied, setCopied] = useState(false);
   const [complete, setComplete] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [help, setHelp] = useState(false);
+
   const [diskSupported,setDiskSupported]=useState(false);
   const [destination,setDestination]=useState("");
   const [choosingFolder,setChoosingFolder]=useState(false);
@@ -194,10 +195,7 @@ export default function GuidedTransfer() {
   const largeOffer=!!offer && offer.files.reduce((n,file)=>n+file.size,0)>MAX_MEMORY;
 
   return <div className="guided-app">
-    <header className="site-header">
-      <button className="brand" onClick={() => { if (mode === "choose") return; restart(); }} aria-label="LocalTransfer, voltar ao início"><span className="brand-icon"><ArrowLeftRight size={22} /></span><span>Local<strong>Transfer</strong></span></button>
-      <button className="help-button" onClick={() => setHelp(!help)} aria-expanded={help}><HelpCircle size={18} /><span>Como funciona</span></button>
-    </header>
+    <TopBar onHome={() => { if (mode !== "choose") restart(); }} />
     <main className="guided-main">
       {mode === "choose" ? <section className="welcome">
         <div className="eyebrow"><span />SEM INSTALAR NADA</div>
@@ -236,7 +234,7 @@ export default function GuidedTransfer() {
 
       {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">{received.some(file=>file.url) ? "Salve os arquivos antes de fechar esta página." : "Os arquivos já foram gravados na pasta escolhida."}</p>{received.map(file => <div className="download-row" key={file.id}><span className="file-icon"><FileIcon size={20} /></span><div><strong>{file.name}</strong><small>{size(file.size)}</small></div>{file.url ? <a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a> : <span className="secondary"><Check size={16} />Salvo na pasta</span>}</div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
 
-      {help && <section className="help-panel"><div><h2>É simples: um envia, o outro recebe.</h2><button aria-label="Fechar ajuda" onClick={() => setHelp(false)}><X size={19} /></button></div><ol><li>No aparelho que tem os arquivos, escolha <strong>Enviar arquivos</strong> e selecione o que vai enviar.</li><li>No outro aparelho, abra este site e escolha <strong>Receber arquivos</strong>.</li><li>Digite o código mostrado por quem envia. Aceite o recebimento e salve os arquivos.</li></ol><p>Você pode usar Wi-Fi ou rede móvel. Envie até 100 GB por vez. Para receber mais de 200 MB, abra o site no Chrome ou Edge do computador e escolha uma pasta com espaço suficiente. Nos navegadores sem essa opção, o recebimento continua limitado a 200 MB. Mantenha as duas páginas abertas e os aparelhos ativos até terminar. Se a conexão cair, será necessário reenviar.</p></section>}
+
       <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
     </main>
     <footer className="site-footer"><span>LocalTransfer</span><span>Do seu aparelho para o outro.</span></footer>
