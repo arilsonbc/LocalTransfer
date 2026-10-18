@@ -104,7 +104,10 @@ test('TURN exige sala autenticada, gera credenciais temporárias e protege o seg
     assert.equal(response.status,200);
     assert.equal(response.headers.get('Cache-Control'),'no-store');
     const data=await response.json();
-    assert.deepEqual(data.iceServers[0].urls,['turns:turn.cloudflare.com:443?transport=tcp']);
+    assert.equal(data.iceServers[1].urls,'turns:turn.cloudflare.com:443?transport=tcp');
+    assert.equal(data.iceServers[1].username,'temporary-user');
+    assert.equal(data.iceServers[1].credential,'temporary-password');
+    assert.ok(!JSON.stringify(data).includes(':53'));
     assert.equal(JSON.stringify(data).includes('server-secret'),false);
     const fixed=()=>new Request('https://localtransfer.test/',{method:'POST',headers:{Authorization:`Bearer ${host.token}`,'x-forwarded-for':'ice-limit'}});
     for(let i=0;i<3;i++) assert.equal((await ice.POST(fixed(),context(host.code))).status,200);
@@ -144,6 +147,44 @@ test('credenciais TURN são carregadas antes da criação da conexão WebRTC',as
     assert.deepEqual(configs,[{iceServers:servers}]);
     assert.deepEqual(errors,[]);
   } finally {connection.close();globalThis.fetch=originalFetch;globalThis.RTCPeerConnection=originalPeer;}
+});
+
+test('pareamento espera a rota TURN estar no SDP antes de sinalizar',async()=>{
+  const originalPeer=globalThis.RTCPeerConnection;
+  globalThis.RTCPeerConnection=class extends EventTarget {
+    connectionState='new';iceConnectionState='new';iceGatheringState='gathering';
+    localDescription={type:'offer',sdp:'v=0\r\na=candidate:1 1 udp 1 192.0.2.1 9999 typ host\r\n'};
+    close(){}
+  };
+  const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(){}};
+  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks,true);
+  try {
+    conn.createPeer([{urls:'turns:turn.cloudflare.com:443?transport=tcp',username:'temporary',credential:'password'}]);
+    let finished=false;
+    const gathering=conn.gather().then(()=>{finished=true;});
+    await Promise.resolve();assert.equal(finished,false);
+    conn.pc.localDescription.sdp+='a=candidate:2 1 udp 1 192.0.2.2 9999 typ relay\r\n';
+    conn.pc.dispatchEvent(new Event('icecandidate'));
+    await gathering;
+    assert.equal(conn.diagnostics.relayCandidates,1);
+    assert.equal(conn.diagnostics.mode,'relay');
+    assert.equal(JSON.stringify(conn.diagnostics).includes('192.0.2'),false);
+  } finally {conn.close();globalThis.RTCPeerConnection=originalPeer;}
+});
+
+test('ausência de rota TURN não é tratada como pareamento pronto',async()=>{
+  const originalPeer=globalThis.RTCPeerConnection;
+  globalThis.RTCPeerConnection=class extends EventTarget {
+    connectionState='new';iceConnectionState='new';iceGatheringState='complete';
+    localDescription={sdp:'v=0\r\na=candidate:1 1 udp 1 192.0.2.1 9999 typ host\r\n'};
+    close(){}
+  };
+  const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(){}};
+  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks);
+  try {
+    conn.createPeer([{urls:'turns:turn.cloudflare.com:443?transport=tcp',username:'temporary',credential:'password'}]);
+    await assert.rejects(()=>conn.gather(),/TURN-SEM-ROTA/);
+  } finally {conn.close();globalThis.RTCPeerConnection=originalPeer;}
 });
 
 class MockPeer {close(){};}

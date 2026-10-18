@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpRight, Check, CheckCheck, Copy, File as FileIcon, HelpCircle, LoaderCircle, LockKeyhole, Plus, ShieldCheck, UploadCloud, X } from "lucide-react";
-import { api, MAX_BATCH, MAX_MEMORY, MAX_FILES, safeFilename, TransferConnection, type FileInfo, type Offer, type Session } from "../lib/transfer";
+import { api, MAX_BATCH, MAX_MEMORY, MAX_FILES, safeFilename, TransferConnection, type ConnectionDiagnostics, type FileInfo, type Offer, type Session } from "../lib/transfer";
 import {canSaveToDisk,chooseReceiveFolder} from "../lib/disk-receiver";
 import TopBar from "./top-bar";
 
@@ -34,6 +34,8 @@ export default function GuidedTransfer() {
   const [diskSupported,setDiskSupported]=useState(false);
   const [destination,setDestination]=useState("");
   const [choosingFolder,setChoosingFolder]=useState(false);
+  const [diagnostics,setDiagnostics]=useState<ConnectionDiagnostics|null>(null);
+  const [diagnosticCopied,setDiagnosticCopied]=useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const connection = useRef<TransferConnection | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -80,7 +82,7 @@ export default function GuidedTransfer() {
       void api(`/api/rooms/${s.code}`, "DELETE", undefined, s.token).catch(() => {});
       return;
     }
-    sessionRef.current = s; setSession(s); setPeer(s.peerName || ""); setState("connecting");
+    sessionRef.current = s; setSession(s); setPeer(s.peerName || ""); setState("connecting");setDiagnostics(null);setDiagnosticCopied(false);
     const active = () => epoch.current === currentEpoch;
     const conn = new TransferConnection(s, {
       state: (next, message) => { if (active()) { setState(next); setStatus(message); } },
@@ -105,8 +107,8 @@ export default function GuidedTransfer() {
         if (!active()) return;
         setComplete(true); setProgress(null); setSending(false); remember(direction, count);
       },
-      error: message => { if (active()) { setError(message); setSending(false); setProgress(null); } },
-    });
+      error: message => { if (active()) { setError(message); setSending(false); setProgress(null);setDiagnostics(connection.current?.diagnostics||null); } },
+    },new URLSearchParams(location.search).get("relay")==="1");
     connection.current = conn; void conn.start();
   }
 
@@ -157,7 +159,7 @@ export default function GuidedTransfer() {
     const old = sessionRef.current; sessionRef.current = null;
     if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
     setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);
-    setOffer(null); setProgress(null); setComplete(false); setError(""); autoStarted.current = false;
+    setOffer(null); setProgress(null); setComplete(false); setError("");setDiagnostics(null);setDiagnosticCopied(false); autoStarted.current = false;
   }
 
   function restart(next: Mode = "choose") {
@@ -229,6 +231,7 @@ export default function GuidedTransfer() {
         </>}
 
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
+        {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
         {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div><progress max={progress?.total || 1} value={progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Envio cancelado. Você pode tentar novamente."); }}>Cancelar transferência</button></section>}
       </section>}
 

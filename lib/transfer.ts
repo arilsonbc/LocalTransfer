@@ -8,6 +8,7 @@ export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string};
 export type Offer = {id:string;files:FileInfo[]};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
+export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
@@ -51,18 +52,26 @@ export class TransferConnection {
   private queue=Promise.resolve();
   private queuedBytes=0;
   private lastProgressAt=0;
-  constructor(private session:Session,private hooks:Hooks) {}
+  private requiresRelay=false;
+  private serverErrors:number[]=[];
+  private failureDiagnostics:ConnectionDiagnostics|null=null;
+  constructor(private session:Session,private hooks:Hooks,private relayOnly=false) {}
   private createPeer(iceServers:RTCIceServer[]) {
-    this.pc=new RTCPeerConnection({iceServers});
+    this.requiresRelay=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
+    this.pc=new RTCPeerConnection({iceServers,...(this.relayOnly?{iceTransportPolicy:"relay" as const}:{})});
+    this.pc.onicecandidateerror=event=>{if(!this.serverErrors.includes(event.errorCode))this.serverErrors.push(event.errorCode);};
     this.pc.ondatachannel=e=>this.bind(e.channel);
     this.pc.onconnectionstatechange=()=>{
       if(this.stopped) return;
-      if(this.pc.connectionState==="failed") this.fail("Não foi possível conectar os aparelhos. Confira a internet nos dois e crie outra sala.");
+      if(this.pc.connectionState==="failed") this.fail("A conexão entre os aparelhos falhou. Crie outra sala e mantenha as duas páginas abertas. Se continuar, copie o diagnóstico abaixo.");
       if(this.pc.connectionState==="disconnected") this.hooks.state("reconnecting","Conexão interrompida. Tentando reconectar…");
       if(this.pc.connectionState==="connected" && this.channel?.readyState==="open") this.hooks.state("connected","Aparelhos conectados");
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
+  get diagnostics():ConnectionDiagnostics {
+    return this.failureDiagnostics||{version:"turn-tls443-v2",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
+  }
   private progress(name:string,current:number,total:number,direction:"send"|"receive") {
     const now=Date.now();
     if(current===0 || current===total || now-this.lastProgressAt>=100){this.lastProgressAt=now;this.hooks.progress(name,current,total,direction);}
@@ -85,13 +94,19 @@ export class TransferConnection {
     } catch(e) {if(!this.stopped) this.fail(e instanceof Error?e.message:"Não foi possível conectar.");}
   }
   private async gather() {
-    if(this.pc.iceGatheringState==="complete") return;
+    const relayReady=()=>!!this.pc.localDescription?.sdp.includes(" typ relay");
+    const ready=()=>this.pc.iceGatheringState==="complete" || (this.requiresRelay && relayReady());
+    if(!ready()) {
     await new Promise<void>(resolve=>{
-      const done=()=>{clearTimeout(timer);this.pc.removeEventListener("icegatheringstatechange",changed);resolve();};
-      const changed=()=>{if(this.pc.iceGatheringState==="complete")done();};
-      const timer=setTimeout(done,20000);
+      const done=()=>{clearTimeout(timer);this.pc.removeEventListener("icegatheringstatechange",changed);this.pc.removeEventListener("icecandidate",changed);resolve();};
+      const changed=()=>{if(ready() || this.stopped)done();};
+      const timer=setTimeout(done,45000);
       this.pc.addEventListener("icegatheringstatechange",changed);
+      this.pc.addEventListener("icecandidate",changed);
+      changed();
     });
+    }
+    if(!this.stopped && this.requiresRelay && !relayReady())throw new Error("Não foi possível acessar o servidor de conexão segura. Copie o diagnóstico abaixo para verificarmos esta rede. Código: TURN-SEM-ROTA.");
   }
   private signal() {
     return api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify(this.pc.localDescription)},this.session.token);
@@ -102,7 +117,7 @@ export class TransferConnection {
       const state=await api<{peerName:string|null;joined:boolean;description:string|null}>(`/api/rooms/${this.session.code}`,"GET",undefined,this.session.token);
       if(this.stopped) return;
       if(state.peerName) this.hooks.peer(state.peerName);
-      if(state.joined && !this.connectTimer) this.connectTimer=setTimeout(()=>this.fail("A conexão demorou demais. Confira a internet nos dois aparelhos e crie outra sala."),90000);
+      if(state.joined && !this.connectTimer) this.connectTimer=setTimeout(()=>this.fail("A conexão demorou demais. Crie outra sala. Se continuar, copie o diagnóstico abaixo."),120000);
       if(state.description && !this.pc.remoteDescription) {
         this.hooks.state("connecting","Estabelecendo conexão segura…");
         await this.pc.setRemoteDescription(JSON.parse(state.description));
@@ -257,7 +272,7 @@ export class TransferConnection {
     this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
   }
   cancel() {if(this.channel?.readyState==="open")this.control({type:"cancel"});this.resetTransfer();}
-  private fail(message:string) {if(this.stopped)return;this.close();this.hooks.state("error",message);this.hooks.error(message);}
+  private fail(message:string) {if(this.stopped)return;this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
   close() {
     this.stopped=true;
     if(this.pollTimer)clearTimeout(this.pollTimer);

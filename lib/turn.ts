@@ -12,13 +12,13 @@ export async function generateIceServers(): Promise<RTCIceServer[]> {
   if (!response.ok) throw new Error("TURN credentials unavailable");
   const data = await response.json() as {iceServers?:RTCIceServer[]};
   if (!Array.isArray(data.iceServers)) throw new Error("Invalid TURN response");
-  // Port 53 is blocked by browsers and delays non-trickle ICE gathering.
-  const servers = data.iceServers.map(server => ({...server, urls:
-    (Array.isArray(server.urls)?server.urls:[server.urls]).filter(url =>
-      typeof url === "string" && /^(stun|turn|turns):/.test(url) && !/:53(?:\?|$)/.test(url))
-  })).filter(server => server.urls.length);
-  if (!servers.some(server => server.urls.some(url => /^turns?:/.test(url)) && server.username && server.credential)) {
-    throw new Error("Missing TURN credentials");
-  }
-  return servers;
+  const relay=data.iceServers.find(server=>server.username && server.credential &&
+    (Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>typeof url==="string" && /^turns?:/.test(url)));
+  if(!relay)throw new Error("Missing TURN credentials");
+  // A single TLS endpoint avoids waiting on UDP/alternate ports on mobile networks.
+  // Credentials issued for Cloudflare TURN work across its documented endpoints.
+  return [
+    {urls:"stun:stun.cloudflare.com:3478"},
+    {urls:"turns:turn.cloudflare.com:443?transport=tcp",username:relay.username,credential:relay.credential},
+  ];
 }

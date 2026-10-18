@@ -53,4 +53,8 @@
 [data-theme=dark] .error-message{background:#3c2b1c;border-color:#6b4d30;color:#f3c58d}
 [data-theme=dark] progress,[data-theme=dark] progress::-webkit-progress-bar{background:#304536}
 .received-heading strong{overflow-wrap:anywhere}
+.connection-diagnostics{margin-top:14px;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--muted);font-size:12px;line-height:1.8}
+.connection-diagnostics summary{cursor:pointer;color:var(--ink)}
+.connection-diagnostics p{margin:12px 0;font-size:11px}
+.connection-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;margin:12px 0}
 @media(max-width:650px){.nav-header>.brand{order:1}.nav-header>.theme-switch{order:2;margin-left:auto}.nav-header>.topnav{order:3;width:100%;margin-left:0;gap:5px}.topnav .nav-item{flex:1}.nav-header{gap:12px}.theme-button{width:34px;height:34px}}
