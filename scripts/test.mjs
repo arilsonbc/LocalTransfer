@@ -26,6 +26,9 @@ const storeUrl='data:text/javascript,export const getRoomStore=()=>globalThis.__
 const create=await import(source('app/api/rooms/route.ts',{'../../../lib/room-store':storeUrl,'../../../lib/room-service':serviceUrl}));
 const join=await import(source('app/api/rooms/[code]/join/route.ts',{'../../../../../lib/room-store':storeUrl,'../../../../../lib/room-service':serviceUrl}));
 const room=await import(source('app/api/rooms/[code]/route.ts',{'../../../../lib/room-store':storeUrl,'../../../../lib/room-service':serviceUrl}));
+const turnUrl=source('lib/turn.ts');
+const turn=await import(turnUrl);
+const ice=await import(source('app/api/rooms/[code]/ice/route.ts',{'../../../../../lib/room-store':storeUrl,'../../../../../lib/room-service':serviceUrl,'../../../../../lib/turn':turnUrl}));
 const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
 const context=code=>({params:Promise.resolve({code})});
 async function newRoom(){const response=await create.POST(request('/api/rooms','POST',{name:'Computador'}));assert.equal(response.status,201);return response.json();}
@@ -74,6 +77,46 @@ test('limite de tentativas é aplicado',async()=>{
   assert.equal(await service.allowed(db,req,'limited',2),true);
   assert.equal(await service.allowed(db,req,'limited',2),true);
   assert.equal(await service.allowed(db,req,'limited',2),false);
+});
+
+test('TURN exige sala autenticada, gera credenciais temporárias e protege o segredo',async()=>{
+  const host=await newRoom();
+  const originalFetch=globalThis.fetch;
+  const originalKey=process.env.CLOUDFLARE_TURN_KEY_ID;
+  const originalToken=process.env.CLOUDFLARE_TURN_API_TOKEN;
+  try {
+    process.env.CLOUDFLARE_TURN_KEY_ID='test-key';
+    process.env.CLOUDFLARE_TURN_API_TOKEN='server-secret';
+    let calls=0;
+    globalThis.fetch=async(url,options)=>{
+      calls++;
+      assert.equal(url,'https://rtc.live.cloudflare.com/v1/turn/keys/test-key/credentials/generate-ice-servers');
+      assert.equal(options.headers.Authorization,'Bearer server-secret');
+      assert.deepEqual(JSON.parse(options.body),{ttl:3600});
+      return Response.json({iceServers:[{urls:['turn:turn.cloudflare.com:53','turns:turn.cloudflare.com:443?transport=tcp'],username:'temporary-user',credential:'temporary-password'}]}, {status:201});
+    };
+    assert.equal((await ice.POST(request('/','POST'),context(host.code))).status,401);
+    assert.equal(calls,0);
+    const response=await ice.POST(request('/','POST',{},host.token),context(host.code));
+    assert.equal(response.status,200);
+    assert.equal(response.headers.get('Cache-Control'),'no-store');
+    const data=await response.json();
+    assert.deepEqual(data.iceServers[0].urls,['turns:turn.cloudflare.com:443?transport=tcp']);
+    assert.equal(JSON.stringify(data).includes('server-secret'),false);
+    const fixed=()=>new Request('https://localtransfer.test/',{method:'POST',headers:{Authorization:`Bearer ${host.token}`,'x-forwarded-for':'ice-limit'}});
+    for(let i=0;i<3;i++) assert.equal((await ice.POST(fixed(),context(host.code))).status,200);
+    assert.equal((await ice.POST(fixed(),context(host.code))).status,429);
+    globalThis.fetch=async()=>new Response('upstream-secret-error',{status:500});
+    const failure=await ice.POST(request('/','POST',{},host.token),context(host.code));
+    assert.equal(failure.status,503);
+    assert.equal((await failure.text()).includes('upstream-secret-error'),false);
+    delete process.env.CLOUDFLARE_TURN_API_TOKEN;
+    await assert.rejects(()=>turn.generateIceServers(),/incomplete/);
+  } finally {
+    globalThis.fetch=originalFetch;
+    if(originalKey===undefined)delete process.env.CLOUDFLARE_TURN_KEY_ID;else process.env.CLOUDFLARE_TURN_KEY_ID=originalKey;
+    if(originalToken===undefined)delete process.env.CLOUDFLARE_TURN_API_TOKEN;else process.env.CLOUDFLARE_TURN_API_TOKEN=originalToken;
+  }
 });
 
 // Transport simulation exercises framing and backpressure independently of

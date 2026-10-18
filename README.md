@@ -12,7 +12,7 @@ Transferência de fotos e arquivos entre iPhone, Android e computador pelo naveg
 
 ## Hospedagem no Vercel
 
-A aplicação é Next.js: interface e rotas `/api/rooms` executam no Vercel. O envio dos arquivos acontece diretamente entre os navegadores por WebRTC.
+A aplicação é Next.js: interface e rotas `/api/rooms` executam no Vercel. O envio usa WebRTC: conexão direta quando possível, ou retransmissão criptografada pelo Cloudflare TURN quando configurado.
 
 Repositório: https://github.com/arilsonbc/LocalTransfer
 
@@ -63,7 +63,8 @@ Testes automatizados de rotas usam armazenamento isolado em memória. O transpor
 - Até 500 arquivos e 200 MiB (apresentados como 200 MB na interface) por lote.
 - Os arquivos recebidos ficam na memória do navegador até serem salvos ou removidos. Mantenha a página aberta e o celular desbloqueado.
 - Não há retomada após interrupções. No iPhone, salvar em Fotos pode exigir o menu de compartilhamento.
-- Usa STUN público do Google; não inclui retransmissor TURN. Algumas redes bloqueiam a conexão direta. Prefira o mesmo Wi-Fi.
+- Para redes móveis e NAT restritivo, configure `CLOUDFLARE_TURN_KEY_ID` e `CLOUDFLARE_TURN_API_TOKEN` como variáveis de servidor na Vercel e faça um novo deploy. A rota autenticada `/api/rooms/[code]/ice` gera credenciais com validade de uma hora; a chave principal nunca vai ao navegador. Sem ambas as variáveis, apenas STUN fica disponível e a conexão entre algumas redes pode falhar. Uma configuração parcial ou falha da Cloudflare retorna erro explícito.
+- O TURN tem consumo de tráfego e franquia definidos pela Cloudflare. Credenciais temporárias limitam a exposição, mas não representam um limite financeiro. Verifique o consumo no painel da conta.
 - O código permite conectar o segundo participante. Compartilhe-o só com o receptor esperado e confira os arquivos antes de aceitar.
 - Não se conecta diretamente ao aplicativo LocalSend.
 

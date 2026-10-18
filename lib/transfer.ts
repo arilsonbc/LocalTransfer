@@ -42,11 +42,11 @@ export class TransferConnection {
   private pending=new Map<string,{resolve:()=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   private queue=Promise.resolve();
   constructor(private session:Session,private hooks:Hooks) {
-    this.pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+    this.pc=new RTCPeerConnection();
     this.pc.ondatachannel=e=>this.bind(e.channel);
     this.pc.onconnectionstatechange=()=>{
       if(this.stopped) return;
-      if(this.pc.connectionState==="failed") this.fail("A rede bloqueou a conexão direta. Tente colocar os aparelhos no mesmo Wi-Fi e criar outra sala.");
+      if(this.pc.connectionState==="failed") this.fail("Não foi possível conectar os aparelhos. Confira a internet nos dois e crie outra sala.");
       if(this.pc.connectionState==="disconnected") this.hooks.state("reconnecting","Conexão interrompida. Tentando reconectar…");
       if(this.pc.connectionState==="connected" && this.channel?.readyState==="open") this.hooks.state("connected","Aparelhos conectados");
     };
@@ -54,6 +54,10 @@ export class TransferConnection {
   get busy() {return this.outgoing || !!this.incoming;}
   async start() {
     try {
+      this.hooks.state("connecting","Preparando conexão segura…");
+      const config=await api<{iceServers:RTCIceServer[]}>(`/api/rooms/${this.session.code}/ice`,"POST",{},this.session.token);
+      if(this.stopped) return;
+      this.pc.setConfiguration({iceServers:config.iceServers});
       if(this.session.role==="host") {
         this.bind(this.pc.createDataChannel("localtransfer-files",{ordered:true}));
         await this.pc.setLocalDescription(await this.pc.createOffer());
@@ -70,7 +74,7 @@ export class TransferConnection {
     await new Promise<void>(resolve=>{
       const done=()=>{clearTimeout(timer);this.pc.removeEventListener("icegatheringstatechange",changed);resolve();};
       const changed=()=>{if(this.pc.iceGatheringState==="complete")done();};
-      const timer=setTimeout(done,10000);
+      const timer=setTimeout(done,20000);
       this.pc.addEventListener("icegatheringstatechange",changed);
     });
   }
@@ -83,7 +87,7 @@ export class TransferConnection {
       const state=await api<{peerName:string|null;joined:boolean;description:string|null}>(`/api/rooms/${this.session.code}`,"GET",undefined,this.session.token);
       if(this.stopped) return;
       if(state.peerName) this.hooks.peer(state.peerName);
-      if(state.joined && !this.connectTimer) this.connectTimer=setTimeout(()=>this.fail("A conexão demorou demais. Use a mesma rede Wi-Fi e crie outra sala."),60000);
+      if(state.joined && !this.connectTimer) this.connectTimer=setTimeout(()=>this.fail("A conexão demorou demais. Confira a internet nos dois aparelhos e crie outra sala."),90000);
       if(state.description && !this.pc.remoteDescription) {
         this.hooks.state("connecting","Estabelecendo conexão segura…");
         await this.pc.setRemoteDescription(JSON.parse(state.description));
