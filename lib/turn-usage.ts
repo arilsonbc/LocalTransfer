@@ -24,7 +24,7 @@ export async function readTurnUsage(store:RoomStore,now=Date.now()):Promise<Turn
     }
     const query=`query($account:String!,$from:Date!,$to:Date!){viewer{accounts(filter:{accountTag:$account}){callsTurnUsageAdaptiveGroups(limit:1,filter:{date_geq:$from,date_leq:$to}){sum{egressBytes ingressBytes}}}}}`;
     const response=await fetch("https://api.cloudflare.com/client/v4/graphql",{method:"POST",cache:"no-store",signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({query,variables:{account,from:start.slice(0,10),to:new Date(now).toISOString().slice(0,10)}})});
-    const data=await response.json();
+    const data=await response.json() as {errors?:unknown[];data?:{viewer?:{accounts?:Array<{callsTurnUsageAdaptiveGroups?:Array<{sum?:{egressBytes:number;ingressBytes:number}}>}>}}};
     const accounts=data?.data?.viewer?.accounts;
     if(!response.ok||data.errors?.length||!Array.isArray(accounts)||accounts.length!==1)throw new Error("Analytics unavailable");
     const groups=accounts[0]?.callsTurnUsageAdaptiveGroups;
