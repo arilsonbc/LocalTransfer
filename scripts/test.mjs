@@ -15,6 +15,7 @@ const service=await import(serviceUrl);
 const transferUrl=source('lib/transfer.ts');
 const transfer=await import(transferUrl);
 const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
+const invite=await import(source('lib/invite.ts'));
 const records=new Map(),counts=new Map();
 const db={
   async create(row){if(records.has(row.code))return false;records.set(row.code,structuredClone(row));return true;},
@@ -35,6 +36,17 @@ const ice=await import(source('app/api/rooms/[code]/ice/route.ts',{'../../../../
 const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
 const context=code=>({params:Promise.resolve({code})});
 async function newRoom(){const response=await create.POST(request('/api/rooms','POST',{name:'Computador'}));assert.equal(response.status,201);return response.json();}
+
+test('convites aceitam código ou link e não incluem tokens ou parâmetros extras',()=>{
+  const url=invite.makeInvite('https://localtransfer.test/?relay=1&token=segredo#anterior','abcd-efgh');
+  assert.equal(url,'https://localtransfer.test/?relay=1#sala=ABCDEFGH');
+  assert.equal(invite.readInvite(url),'ABCDEFGH');
+  assert.equal(invite.readInvite('abcd efgh'),'ABCDEFGH');
+  assert.equal(invite.readInvite('https://outro.test/#sala=ABCDEFGH'),'ABCDEFGH');
+  assert.equal(invite.readInvite('https://localtransfer.test/#token=segredo'),null);
+  assert.equal(invite.readInvite('<script>'),null);
+  assert.throws(()=>invite.makeInvite('https://localtransfer.test','invalid'));
+});
 
 test('códigos aleatórios, normalização e tokens',async()=>{
   for(let i=0;i<100;i++)assert.match(service.makeCode(),service.ROOM_PATTERN);
