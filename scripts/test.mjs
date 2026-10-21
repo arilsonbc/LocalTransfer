@@ -219,7 +219,7 @@ test('ausência de rota TURN não é tratada como pareamento pronto',async()=>{
     close(){}
   };
   const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(){}};
-  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks);
+  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks,true);
   try {
     conn.createPeer([{urls:'turns:turn.cloudflare.com:443?transport=tcp',username:'temporary',credential:'password'}]);
     await assert.rejects(()=>conn.gather(),/TURN-SEM-ROTA/);
@@ -227,6 +227,31 @@ test('ausência de rota TURN não é tratada como pareamento pronto',async()=>{
 });
 
 class MockPeer {close(){};}
+
+test('reconexão ignora SDP de uma tentativa anterior',async()=>{
+  const originalFetch=globalThis.fetch;
+  const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(){}};
+  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks);
+  let applied=0;
+  conn.revision=2;
+  conn.pc={close(){},async setRemoteDescription(){applied++;}};
+  try {
+    globalThis.fetch=async()=>Response.json({joined:true,description:JSON.stringify({type:'answer',sdp:'old',revision:1})});
+    await conn.poll();assert.equal(applied,0);
+    globalThis.fetch=async()=>Response.json({joined:true,description:JSON.stringify({type:'answer',sdp:'new',revision:2})});
+    await conn.poll();assert.equal(applied,1);
+  } finally {conn.close();globalThis.fetch=originalFetch;}
+});
+
+test('queda transitória preserva os blocos e o destino de gravação',async()=>{
+  const hooks={state(){},peer(){},offer(){},progress(){},file(){},complete(){},error(){}};
+  const conn=new transfer.TransferConnection({code:'ABCDEFGH',token:'a'.repeat(64),role:'host'},hooks);
+  let aborted=false;
+  conn.receiving={info:{id:'file'},bytes:16384,chunks:[],sink:{async abort(){aborted=true;}}};
+  const waiting=assert.rejects(conn.wait('flow'),/Reconectando/);
+  try {conn.pauseTransport();await waiting;assert.equal(conn.receiving.bytes,16384);assert.equal(aborted,false);}
+  finally{conn.close();}
+});
 class MockChannel extends EventTarget {
   readyState='open';bufferedAmount=0;bufferedAmountLowThreshold=65536;peer=null;
   send(value){

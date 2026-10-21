@@ -27,11 +27,12 @@ export function safeFilename(name:string) {
   return name.replace(/[\\/\u0000-\u001f<>:"|?*]/g,"_").replace(/^\.+/,"_").slice(0,240)||"arquivo";
 }
 export async function api<T=Record<string,unknown>>(path:string,method="GET",data?:unknown,token?:string):Promise<T> {
-  const res=await fetch(path,{method,cache:"no-store",headers:{...(data?{"Content-Type":"application/json"}:{}),...(token?{Authorization:`Bearer ${token}`}:{})},body:data?JSON.stringify(data):undefined});
+  const res=await fetch(path,{method,cache:"no-store",signal:AbortSignal.timeout(15000),headers:{...(data?{"Content-Type":"application/json"}:{}),...(token?{Authorization:`Bearer ${token}`}:{})},body:data?JSON.stringify(data):undefined});
   const result=await res.json() as {error?:string};
   if(!res.ok) throw new Error(result.error||"Não foi possível comunicar com o serviço.");
   return result as T;
 }
+class TransportInterrupted extends Error {}
 
 export class TransferConnection {
   private pc!:RTCPeerConnection;
@@ -59,22 +60,42 @@ export class TransferConnection {
   private meter=new ProgressMeter();
   private outgoingOffer:Offer|null=null;
   private sendIndex=0;
+  private iceServers:RTCIceServer[]=[];
+  private revision=0;
+  private transportGeneration=0;
+  private lastRemote="";
+  private negotiating=false;
+  private polling=false;
+  private recovering=false;
+  private completed=false;
+  private retries=0;
+  private retryTimer:ReturnType<typeof setTimeout>|null=null;
+  private disconnectTimer:ReturnType<typeof setTimeout>|null=null;
   constructor(private session:Session,private hooks:Hooks,private relayOnly=false) {}
   private createPeer(iceServers:RTCIceServer[]) {
+    const generation=++this.transportGeneration;
+    const oldChannel=this.channel;this.channel=null;
+    oldChannel?.close();this.pc?.close();
     this.requiresRelay=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
     this.pc=new RTCPeerConnection({iceServers,...(this.relayOnly?{iceTransportPolicy:"relay" as const}:{})});
     this.pc.onicecandidateerror=event=>{if(!this.serverErrors.includes(event.errorCode))this.serverErrors.push(event.errorCode);};
-    this.pc.ondatachannel=e=>this.bind(e.channel);
+    this.pc.ondatachannel=e=>{if(generation===this.transportGeneration)this.bind(e.channel);};
     this.pc.onconnectionstatechange=()=>{
-      if(this.stopped) return;
-      if(this.pc.connectionState==="failed") this.fail("A conexão entre os aparelhos falhou. Crie outra sala e mantenha as duas páginas abertas. Se continuar, copie o diagnóstico abaixo.");
-      if(this.pc.connectionState==="disconnected") this.hooks.state("reconnecting","Conexão interrompida. Tentando reconectar…");
-      if(this.pc.connectionState==="connected" && this.channel?.readyState==="open") this.hooks.state("connected","Aparelhos conectados");
+      if(this.stopped || generation!==this.transportGeneration || this.completed) return;
+      if(this.pc.connectionState==="failed")this.retry();
+      if(this.pc.connectionState==="disconnected"){
+        this.hooks.state("reconnecting","A internet oscilou. Mantenha as páginas abertas; vamos reconectar.");
+        if(!this.disconnectTimer)this.disconnectTimer=setTimeout(()=>{this.disconnectTimer=null;this.retry();},4000);
+      }
+      if(this.pc.connectionState==="connected" && this.channel?.readyState==="open"){
+        if(this.disconnectTimer)clearTimeout(this.disconnectTimer);this.disconnectTimer=null;
+        this.hooks.state("connected","Aparelhos conectados");
+      }
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
   get diagnostics():ConnectionDiagnostics {
-    return this.failureDiagnostics||{version:"turn-tls443-v2",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
+    return this.failureDiagnostics||{version:"recovery-v3",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
   }
   private progress(name:string,current:number,total:number,direction:"send"|"receive") {
     const now=Date.now();
@@ -92,17 +113,46 @@ export class TransferConnection {
       this.hooks.state("connecting","Preparando conexão segura…");
       const config=await api<{iceServers:RTCIceServer[]}>(`/api/rooms/${this.session.code}/ice`,"POST",{},this.session.token);
       if(this.stopped) return;
-      this.createPeer(config.iceServers);
+      this.iceServers=config.iceServers;
       if(this.session.role==="host") {
-        this.bind(this.pc.createDataChannel("localtransfer-files",{ordered:true}));
-        await this.pc.setLocalDescription(await this.pc.createOffer());
-        await this.gather();
-        if(this.stopped) return;
-        await this.signal();
+        await this.hostOffer();
         this.hooks.state("waiting","Sala pronta. Conecte o outro aparelho.");
-      } else this.hooks.state("connecting","Estabelecendo conexão segura…");
+      } else {this.createPeer(this.iceServers);this.hooks.state("connecting","Estabelecendo conexão segura…");}
       void this.poll();
     } catch(e) {if(!this.stopped) this.fail(e instanceof Error?e.message:"Não foi possível conectar.");}
+  }
+  private deadline(){
+    if(!this.connectTimer)this.connectTimer=setTimeout(()=>this.fail("Não conseguimos recuperar a conexão em dois minutos. Crie outra sala e mantenha os aparelhos ativos."),120000);
+  }
+  private pauseTransport(){
+    this.recovering=true;this.meter.reset();this.deadline();
+    this.rejectAll(new TransportInterrupted("Reconectando…"));
+    this.hooks.state("reconnecting","Reconectando automaticamente. Os dados já recebidos serão preservados enquanto as páginas estiverem abertas.");
+  }
+  retry(){
+    if(this.stopped || this.completed || this.negotiating || this.retryTimer)return;
+    if(this.retries>=3){this.fail("Não foi possível recuperar a conexão. Confira a internet nos dois aparelhos e crie outra sala.");return;}
+    this.retries++;this.pauseTransport();
+    this.retryTimer=setTimeout(()=>{
+      this.retryTimer=null;
+      if(this.stopped)return;
+      if(this.session.role==="host")void this.hostOffer(true).catch(()=>this.retry());
+      else if(this.revision)void api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify({type:"restart",revision:this.revision})},this.session.token).catch(()=>this.retry());
+      void this.poll();
+    },Math.min(1000*this.retries,3000));
+  }
+  private async hostOffer(relay=this.relayOnly){
+    if(this.negotiating || this.stopped)return;
+    this.negotiating=true;this.relayOnly=relay;this.revision++;
+    try{
+      this.createPeer(this.iceServers);
+      const generation=this.transportGeneration;
+      this.bind(this.pc.createDataChannel("localtransfer-files",{ordered:true}));
+      await this.pc.setLocalDescription(await this.pc.createOffer());
+      await this.gather();
+      if(this.stopped || generation!==this.transportGeneration)return;
+      await this.signal();
+    }finally{this.negotiating=false;}
   }
   private async gather() {
     const relayReady=()=>!!this.pc.localDescription?.sdp.includes(" typ relay");
@@ -117,21 +167,35 @@ export class TransferConnection {
       changed();
     });
     }
-    if(!this.stopped && this.requiresRelay && !relayReady())throw new Error("Não foi possível acessar o servidor de conexão segura. Copie o diagnóstico abaixo para verificarmos esta rede. Código: TURN-SEM-ROTA.");
+    if(!this.stopped && this.requiresRelay && this.relayOnly && !relayReady())throw new Error("Não foi possível acessar o servidor de conexão segura. Copie o diagnóstico abaixo para verificarmos esta rede. Código: TURN-SEM-ROTA.");
   }
   private signal() {
-    return api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify(this.pc.localDescription)},this.session.token);
+    return api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify({type:this.pc.localDescription?.type,sdp:this.pc.localDescription?.sdp,revision:this.revision,relay:this.relayOnly})},this.session.token);
   }
   private async poll() {
-    if(this.stopped || this.channel?.readyState==="open") return;
+    if(this.stopped || this.completed || this.polling)return;
+    this.polling=true;
+    let negotiatingHere=false;
     try {
       const state=await api<{peerName:string|null;joined:boolean;description:string|null}>(`/api/rooms/${this.session.code}`,"GET",undefined,this.session.token);
       if(this.stopped) return;
       if(state.peerName) this.hooks.peer(state.peerName);
-      if(state.joined && !this.connectTimer) this.connectTimer=setTimeout(()=>this.fail("A conexão demorou demais. Crie outra sala. Se continuar, copie o diagnóstico abaixo."),120000);
-      if(state.description && !this.pc.remoteDescription) {
+      if(state.joined && this.channel?.readyState!=="open")this.deadline();
+      if(state.description && !this.negotiating) {
+        const description=JSON.parse(state.description);
+        const revision=description.revision||0;
+        if(this.session.role==="host" && description.type==="restart" && revision===this.revision){this.retry();return;}
+        if(this.session.role==="host" && (description.type!=="answer" || revision!==this.revision || this.pc.remoteDescription))return;
+        if(this.session.role==="guest" && (description.type!=="offer" || revision<this.revision || state.description===this.lastRemote))return;
+        this.lastRemote=state.description;
+        this.negotiating=true;negotiatingHere=true;
+        if(this.session.role==="guest"){
+          if(this.channel)this.pauseTransport();
+          this.revision=revision;this.relayOnly=this.relayOnly||description.relay===true;
+          this.createPeer(this.iceServers);
+        }
         this.hooks.state("connecting","Estabelecendo conexão segura…");
-        await this.pc.setRemoteDescription(JSON.parse(state.description));
+        await this.pc.setRemoteDescription({type:description.type,sdp:description.sdp});
         if(this.session.role==="guest") {
           await this.pc.setLocalDescription(await this.pc.createAnswer());
           await this.gather();
@@ -140,27 +204,36 @@ export class TransferConnection {
         }
       }
     } catch(e) {
-      if(!this.stopped)this.fail(e instanceof Error?e.message:"A sala expirou.");
-      return;
+      if(!this.stopped && this.channel?.readyState!=="open" && (!this.negotiating || negotiatingHere)){this.negotiating=false;this.retry();}
+    } finally {
+      if(negotiatingHere)this.negotiating=false;this.polling=false;
+      if(!this.stopped && !this.completed){
+        if(this.pollTimer)clearTimeout(this.pollTimer);
+        this.pollTimer=setTimeout(()=>void this.poll(),this.channel?.readyState==="open"?5000:1500);
+      }
     }
-    if(!this.stopped && this.pc.connectionState!=="connected")this.pollTimer=setTimeout(()=>void this.poll(),1500);
   }
   private bind(channel:RTCDataChannel) {
     this.channel=channel;
     channel.binaryType="arraybuffer";
     channel.bufferedAmountLowThreshold=65536;
     channel.onopen=()=>{
-      if(this.connectTimer)clearTimeout(this.connectTimer);
-      if(this.pollTimer)clearTimeout(this.pollTimer);
-      this.hooks.state("connected","Aparelhos conectados");
+      void this.queue.then(()=>{
+        if(this.stopped || this.channel!==channel)return;
+        if(this.connectTimer)clearTimeout(this.connectTimer);this.connectTimer=null;
+        if(this.retryTimer)clearTimeout(this.retryTimer);this.retryTimer=null;
+        this.recovering=false;this.retries=0;this.resolve("ready");
+        this.hooks.state("connected","Aparelhos conectados");
+      });
     };
-    channel.onclose=()=>{if(!this.stopped)this.fail("O outro aparelho desconectou. Crie outra sala para continuar.");};
-    channel.onerror=()=>{if(!this.stopped)this.fail("A transferência foi interrompida. Reconecte os aparelhos.");};
+    channel.onclose=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
+    channel.onerror=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
     channel.onmessage=event=>{
+      if(this.stopped || this.channel!==channel)return;
       const bytes=typeof event.data==="string"?event.data.length*2:event.data instanceof Blob?event.data.size:event.data.byteLength;
       this.queuedBytes+=bytes;
       if(this.queuedBytes>4*FLOW_WINDOW){this.fail("O envio excedeu a velocidade de gravação. Tente novamente.");return;}
-      this.queue=this.queue.then(()=>{if(!this.stopped)return this.message(event.data);}).catch(e=>{this.cancel();this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");}).finally(()=>{this.queuedBytes-=bytes;});
+      this.queue=this.queue.then(()=>{if(!this.stopped && this.channel===channel)return this.message(event.data);}).catch(e=>{if(e instanceof TransportInterrupted)return;this.cancel();this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");}).finally(()=>{this.queuedBytes-=bytes;});
     };
   }
   private control(value:unknown) {
@@ -174,7 +247,7 @@ export class TransferConnection {
     });
   }
   private resolve(key:string) {const p=this.pending.get(key);if(p){clearTimeout(p.timer);p.resolve();this.pending.delete(key);}}
-  private rejectAll(message:string) {for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error(message));}this.pending.clear();}
+  private rejectAll(message:string|Error) {for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(typeof message==="string"?new Error(message):message);}this.pending.clear();}
   private async message(data:string|ArrayBuffer|Blob) {
     if(typeof data!=="string") {
       const r=this.receiving;
@@ -287,6 +360,8 @@ export class TransferConnection {
   private fail(message:string) {if(this.stopped)return;this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
   close() {
     this.stopped=true;
+    if(this.retryTimer)clearTimeout(this.retryTimer);
+    if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
     if(this.pollTimer)clearTimeout(this.pollTimer);
     if(this.connectTimer)clearTimeout(this.connectTimer);
     this.resetTransfer();this.channel?.close();this.pc?.close();
