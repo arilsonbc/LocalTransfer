@@ -332,6 +332,34 @@ function reconnectTransport(p){
     p.left.bind(left);p.right.bind(right);left.onopen();right.onopen();
   },5);
 }
+async function until(predicate,timeout=2000){const start=Date.now();while(!predicate()){if(Date.now()-start>timeout)throw new Error('Condition timed out');await new Promise(r=>setTimeout(r,5));}}
+test('pausa nos dois aparelhos preserva progresso e hash inclusive apos reconexao',async()=>{
+  const p=pair();const bytes=Buffer.alloc(3*transfer.FLOW_WINDOW+37,97);let requested=false;
+  const progress=p.right.hooks.progress;
+  p.right.hooks.progress=(...args)=>{progress(...args);if(args[1]>=131072&&!requested){requested=true;p.right.setPaused(true);}};
+  try{
+    const sending=p.left.send([new File([bytes],'pausar.bin')]);
+    await until(()=>p.left.remotePaused);await new Promise(r=>setTimeout(r,50));
+    const received=p.right.receiving.bytes;await new Promise(r=>setTimeout(r,50));assert.equal(p.right.receiving.bytes,received);
+    p.left.setPaused(true);await until(()=>p.right.remotePaused);p.right.setPaused(false);
+    await until(()=>!p.left.remotePaused);assert.equal(p.left.paused,true);
+    reconnectTransport(p);await new Promise(r=>setTimeout(r,50));
+    assert.equal(p.right.receiving.bytes,received);assert.equal(p.completions.length,0);
+    p.left.setPaused(false);await sending;await new Promise(r=>setTimeout(r,10));
+    assert.equal(p.blobs.length,1);assert.equal(p.blobs[0].info.integrity,'verified');assert.deepEqual(Buffer.from(await p.blobs[0].blob.arrayBuffer()),bytes);
+  }finally{p.left.close();p.right.close();}
+});
+test('pausa suspende timeout de confirmacoes e cancelamento libera espera',async()=>{
+  const p=pair();
+  try{
+    p.left.updatePause(true,false);let settled=false;
+    const waiting=p.left.wait('probe',30).finally(()=>{settled=true;});
+    await new Promise(r=>setTimeout(r,70));assert.equal(settled,false);
+    p.left.updatePause(false,false);p.left.resolve('probe');await waiting;
+    p.left.updatePause(true,false);const blocked=p.left.waitIfPaused();p.left.cancel();
+    await assert.rejects(()=>blocked,/cancelada/);
+  }finally{p.left.close();p.right.close();}
+});
 
 test('retomada preserva bytes de um arquivo parcial e não repete os arquivos concluídos',async()=>{
   const received=[],opened=[];let dropped=false,resumedOffset=0;
