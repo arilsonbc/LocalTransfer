@@ -22,8 +22,8 @@ export async function readTurnUsage(store:RoomStore,now=Date.now()):Promise<Turn
       if(value.periodStart===start&&value.checkedAt<=now&&now-value.checkedAt<300000&&Number.isFinite(value.egressBytes)&&value.egressBytes>=0&&Number.isFinite(value.ingressBytes)&&value.ingressBytes>=0)
         return classify({...base,egressBytes:value.egressBytes,ingressBytes:value.ingressBytes,checkedAt:value.checkedAt});
     }
-    const query=`query($account:String!,$from:Time!,$to:Time!){viewer{accounts(filter:{accountTag:$account}){callsTurnUsageAdaptiveGroups(limit:1,filter:{datetime_geq:$from,datetime_leq:$to}){sum{egressBytes ingressBytes}}}}}`;
-    const response=await fetch("https://api.cloudflare.com/client/v4/graphql",{method:"POST",cache:"no-store",signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({query,variables:{account,from:start,to:new Date(now).toISOString()}})});
+    const query=`query($account:String!,$from:Date!,$to:Date!){viewer{accounts(filter:{accountTag:$account}){callsTurnUsageAdaptiveGroups(limit:1,filter:{date_geq:$from,date_leq:$to}){sum{egressBytes ingressBytes}}}}}`;
+    const response=await fetch("https://api.cloudflare.com/client/v4/graphql",{method:"POST",cache:"no-store",signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({query,variables:{account,from:start.slice(0,10),to:new Date(now).toISOString().slice(0,10)}})});
     const data=await response.json();
     const accounts=data?.data?.viewer?.accounts;
     if(!response.ok||data.errors?.length||!Array.isArray(accounts)||accounts.length!==1)throw new Error("Analytics unavailable");

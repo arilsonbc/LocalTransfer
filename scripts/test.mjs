@@ -34,10 +34,53 @@ const join=await import(source('app/api/rooms/[code]/join/route.ts',{'../../../.
 const room=await import(source('app/api/rooms/[code]/route.ts',{'../../../../lib/room-store':storeUrl,'../../../../lib/room-service':serviceUrl}));
 const turnUrl=source('lib/turn.ts');
 const turn=await import(turnUrl);
-const ice=await import(source('app/api/rooms/[code]/ice/route.ts',{'../../../../../lib/room-store':storeUrl,'../../../../../lib/room-service':serviceUrl,'../../../../../lib/turn':turnUrl}));
+const usageUrl=source('lib/turn-usage.ts');
+const usage=await import(usageUrl);
+const ice=await import(source('app/api/rooms/[code]/ice/route.ts',{'../../../../../lib/room-store':storeUrl,'../../../../../lib/room-service':serviceUrl,'../../../../../lib/turn-usage':usageUrl,'../../../../../lib/turn':turnUrl}));
 const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
 const context=code=>({params:Promise.resolve({code})});
 async function newRoom(){const response=await create.POST(request('/api/rooms','POST',{name:'Computador'}));assert.equal(response.status,201);return response.json();}
+
+test('consumo TURN usa egress da Cloudflare, cache compartilhado e orcamento atualizado',async()=>{
+  const original=globalThis.fetch;const env={...process.env};const cache=new Map();let calls=0;
+  const store={cached:async k=>cache.get(k)||null,cache:async(k,v)=>cache.set(k,v)};
+  try{
+    process.env.CLOUDFLARE_ACCOUNT_ID='test-account';process.env.CLOUDFLARE_ANALYTICS_API_TOKEN='analytics-secret';process.env.TURN_MONTHLY_BUDGET_GB='1';
+    globalThis.fetch=async(url,options)=>{calls++;const body=JSON.parse(options.body);assert.equal(body.variables.from,'2026-10-01');assert.equal(body.variables.to,'2026-10-21');assert.equal(options.headers.Authorization,'Bearer analytics-secret');return Response.json({data:{viewer:{accounts:[{callsTurnUsageAdaptiveGroups:[{sum:{egressBytes:850000000,ingressBytes:900000000}}]}]}},errors:null});};
+    const now=Date.parse('2026-10-21T10:00:00Z');
+    assert.equal((await usage.readTurnUsage(store,now)).status,'warning');
+    assert.equal((await usage.readTurnUsage(store,now+1000)).status,'warning');assert.equal(calls,1);
+    process.env.TURN_MONTHLY_BUDGET_GB='0.5';assert.equal((await usage.readTurnUsage(store,now+2000)).status,'limit');assert.equal(calls,1);
+    await usage.readTurnUsage(store,now+300001);assert.equal(calls,2);
+  }finally{globalThis.fetch=original;process.env=env;}
+});
+test('erros e configuracao parcial de Analytics nunca viram consumo zero autorizado',async()=>{
+  const original=globalThis.fetch;const env={...process.env};
+  try{
+    process.env.CLOUDFLARE_ACCOUNT_ID='test-account';process.env.CLOUDFLARE_ANALYTICS_API_TOKEN='analytics-secret';
+    for(const data of [{errors:[{message:'secret upstream failure'}]},{data:{viewer:{accounts:[]}}},{data:{viewer:{accounts:[{callsTurnUsageAdaptiveGroups:[{sum:{egressBytes:-1,ingressBytes:0}}]}]}}}]){
+      globalThis.fetch=async()=>Response.json(data);assert.equal((await usage.readTurnUsage({})).status,'unavailable');
+    }
+    delete process.env.CLOUDFLARE_ANALYTICS_API_TOKEN;assert.equal((await usage.readTurnUsage({})).status,'unavailable');
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;assert.equal((await usage.readTurnUsage({})).status,'disabled');
+    process.env.TURN_MONTHLY_BUDGET_GB='invalid';await assert.rejects(()=>usage.readTurnUsage({}),/Invalid TURN budget/);
+  }finally{globalThis.fetch=original;process.env=env;}
+});
+test('limite de consumo impede emitir credenciais sem impedir tentativa direta',async()=>{
+  const original=globalThis.fetch;const env={...process.env};
+  try{
+    const host=await newRoom();let calls=0;
+    process.env.CLOUDFLARE_ACCOUNT_ID='test-account';process.env.CLOUDFLARE_ANALYTICS_API_TOKEN='analytics-secret';process.env.TURN_MONTHLY_BUDGET_GB='1';
+    globalThis.fetch=async url=>{calls++;assert.equal(url,'https://api.cloudflare.com/client/v4/graphql');return Response.json({data:{viewer:{accounts:[{callsTurnUsageAdaptiveGroups:[{sum:{egressBytes:1000000000,ingressBytes:1500000000}}]}]}}});};
+    const response=await ice.POST(request('/','POST',{},host.token),context(host.code));assert.equal(response.status,200);
+    const data=await response.json();assert.equal(data.turn.status,'limit');assert.deepEqual(data.iceServers,usage.STUN_ONLY);assert.equal(calls,1);assert.ok(!JSON.stringify(data).includes('analytics-secret'));assert.ok(!JSON.stringify(data).includes('1500000000'));
+  }finally{globalThis.fetch=original;process.env=env;}
+});
+test('cota por participante nao pode ser contornada trocando de IP',async()=>{
+  const host=await newRoom();const key=`ice-session:${host.code}:host`;counts.set(key,6);
+  const response=await ice.POST(request('/','POST',{},host.token),context(host.code));assert.equal(response.status,429);
+  assert.equal((await ice.POST(request('/','POST',{},host.token),context(host.code))).status,429);
+});
 
 test('convites aceitam código ou link e não incluem tokens ou parâmetros extras',()=>{
   const url=invite.makeInvite('https://localtransfer.test/?relay=1&token=segredo#anterior','abcd-efgh');
