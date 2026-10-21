@@ -57,4 +57,12 @@
 .connection-diagnostics summary{cursor:pointer;color:var(--ink)}
 .connection-diagnostics p{margin:12px 0;font-size:11px}
 .connection-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;margin:12px 0}
+.invite-card{border-top:1px solid var(--line);margin-top:24px;padding-top:18px}
+.invite-card>p{font-size:12px;color:var(--muted);margin-bottom:13px}
+.invite-actions{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:10px}
+.invite-actions .secondary{padding:11px 13px}.invite-actions span{display:flex}
+.invite-card>small,.invite-qr>small{display:block;color:var(--muted);font-size:10px;line-height:1.8;margin-top:13px}
+.invite-qr{margin:19px auto 0}.invite-qr img{display:block;border-radius:12px;margin:auto;background:#fff;max-width:100%;height:auto}
+.invite-notice p{font-size:11px;margin-top:12px;color:var(--muted)}
+.invite-notice input{width:100%;padding:10px;border:1px solid var(--line);background:var(--bg);border-radius:8px;color:var(--ink);font-size:11px;margin-top:8px}
 @media(max-width:650px){.nav-header>.brand{order:1}.nav-header>.theme-switch{order:2;margin-left:auto}.nav-header>.topnav{order:3;width:100%;margin-left:0;gap:5px}.topnav .nav-item{flex:1}.nav-header{gap:12px}.theme-button{width:34px;height:34px}}
