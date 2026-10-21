@@ -7,7 +7,7 @@ Transferência de fotos e arquivos entre iPhone, Android e computador pelo naveg
 1. No aparelho que tem os arquivos, escolha **Enviar arquivos**.
 2. Selecione os arquivos. O código aparece automaticamente.
 3. No outro aparelho, escolha **Receber arquivos**.
-4. Digite o código, conecte e aceite o recebimento.
+4. Digite o código, abra o link de convite ou leia o QR Code com a câmera. Conecte e aceite o recebimento.
 5. Toque em **Salvar** em cada arquivo recebido.
 
 ## Hospedagem no Vercel
@@ -34,9 +34,15 @@ A integração deve fornecer um destes pares de variáveis, sempre no servidor:
 
 Não use prefixo `NEXT_PUBLIC_` nessas variáveis. Não coloque tokens no GitHub. O arquivo `.env.example` contém somente exemplos.
 
-As salas expiram automaticamente após 20 minutos. Redis guarda apenas hashes dos tokens e dados temporários de conexão (nome dos aparelhos e SDP), nunca fotos ou arquivos. O ingresso do segundo participante e a atualização da sinalização são atômicos via Lua. Cada sala aceita dois aparelhos; alterações preservam o prazo original, sem prolongar a validade.
+Salas não pareadas expiram após 20 minutos. Depois do primeiro ingresso, a sala fica reservada aos mesmos dois tokens por até 48 horas para permitir reconexão. Redis guarda apenas hashes dos tokens e dados temporários de conexão (nome dos aparelhos e SDP), nunca fotos ou arquivos. O ingresso do segundo participante e a atualização da sinalização são atômicos via Lua. Cada sala aceita dois aparelhos; o código não permite que um terceiro substitua o receptor. Atualizações de sinalização não prolongam a validade da sessão.
 
 A integração GitHub/Vercel publica novos commits da branch `main`. `vercel.json` fixa o preset Next.js e os comandos de instalação/build. O GitHub Actions executa os testes, a checagem de tipos e o build.
+
+## Conectar e acompanhar
+
+- Convites e QR Codes são gerados localmente e contêm apenas o código da sala. Não há serviço externo de QR nem token de autenticação no link. O modo TURN forçado é preservado quando solicitado no endereço.
+- O progresso mostra o lote completo, número do arquivo, velocidade estimada e tempo restante. A estimativa reinicia após reconexões.
+- Durante a transferência, o site solicita manter a tela ligada onde a API estiver disponível. Isso não garante execução em segundo plano: voltar a outra aplicação ou bloquear o telefone pode suspender a página.
 
 ## Desenvolvimento
 
@@ -60,13 +66,13 @@ Testes automatizados de rotas usam armazenamento isolado em memória. O transpor
 
 ## Limitações
 
-A rota TURN usa TLS na porta 443, evitando tentativas nos vários caminhos UDP e portas alternativas em redes móveis. O pareamento espera uma rota `relay` aparecer no SDP; se isso não acontecer em até 45 segundos, exibe `TURN-SEM-ROTA` e um diagnóstico local sem IPs, arquivos ou credenciais. Para testar exclusivamente o retransmissor, abra `/?relay=1` nos dois aparelhos. Esse modo usa `iceTransportPolicy: relay`, sem conexão direta.
+A rota TURN usa TLS na porta 443, evitando tentativas nos vários caminhos UDP e portas alternativas em redes móveis. O modo automático mantém as rotas diretas disponíveis e, se o pareamento falhar, tenta novamente usando apenas TURN. No modo forçado, o pareamento espera uma rota `relay` no SDP por até 45 segundos; se não aparecer, informa `TURN-SEM-ROTA`. O diagnóstico local não inclui IPs, arquivos ou credenciais. Para testar exclusivamente o retransmissor, abra `/?relay=1` nos dois aparelhos. Esse modo usa `iceTransportPolicy: relay`, sem conexão direta.
 
 - Até 500 arquivos e 100 GB decimais (100.000.000.000 bytes) por lote, inclusive um arquivo único de até 100 GB.
 - Lotes acima de 200 MiB exigem `showDirectoryPicker` no receptor (Chrome/Edge de computador). O receptor escolhe a pasta, e cada arquivo é gravado por fluxo em uma subpasta nova, com nomes numerados para evitar sobrescritas. O envio aguarda confirmação do receptor a cada 1 MiB, mantendo a fila de gravação limitada. É necessário espaço livre suficiente; falhas de gravação cancelam a transferência e abortam o arquivo atual.
 - Nos navegadores sem gravação direta, como Safari/iPhone e navegadores móveis sem o seletor, o limite de recebimento permanece em 200 MiB. Arquivos pequenos continuam na memória até salvar/remover. Esses dispositivos podem enviar arquivos maiores para um receptor compatível. Mantenha as páginas abertas e os aparelhos ativos.
-- Não há retomada após interrupções. No iPhone, salvar em Fotos pode exigir o menu de compartilhamento.
-- Para redes móveis e NAT restritivo, configure `CLOUDFLARE_TURN_KEY_ID` e `CLOUDFLARE_TURN_API_TOKEN` como variáveis de servidor na Vercel e faça um novo deploy. A rota autenticada `/api/rooms/[code]/ice` gera credenciais com validade de 48 horas para permitir transferências longas; a chave principal nunca vai ao navegador. O código da sala continua válido por 20 minutos para parear; uma transferência já conectada não depende da sala. Sem ambas as variáveis, apenas STUN fica disponível e a conexão entre algumas redes pode falhar. Uma configuração parcial ou falha da Cloudflare retorna erro explícito.
+- A retomada é automática durante quedas curtas, com as duas páginas abertas e a seleção de arquivos e o destino ainda disponíveis. A negociação é versionada; respostas antigas são ignoradas. O receptor informa arquivo e byte já recebido, preservando o escritor em disco ou os blocos em memória. Arquivos concluídos não são duplicados. A recuperação tenta até cinco vezes, com espera crescente, dentro de dois minutos. Cancelamento, erro de disco, fechamento/recarregamento da página ou encerramento do navegador não são retomáveis nesta versão. No iPhone, salvar em Fotos pode exigir o menu de compartilhamento.
+- Para redes móveis e NAT restritivo, configure `CLOUDFLARE_TURN_KEY_ID` e `CLOUDFLARE_TURN_API_TOKEN` como variáveis de servidor na Vercel e faça um novo deploy. A rota autenticada `/api/rooms/[code]/ice` gera credenciais com validade de 48 horas para permitir transferências longas; a chave principal nunca vai ao navegador. O código da sala vale por 20 minutos para o primeiro pareamento; a sessão privada pareada fica disponível por até 48 horas. Sem ambas as variáveis, apenas STUN fica disponível e a conexão entre algumas redes pode falhar. Uma configuração parcial ou falha da Cloudflare retorna erro explícito.
 - O TURN tem consumo de tráfego e franquia definidos pela Cloudflare. Credenciais temporárias limitam a exposição, mas não representam um limite financeiro. Verifique o consumo no painel da conta.
 - O código permite conectar o segundo participante. Compartilhe-o só com o receptor esperado e confira os arquivos antes de aceitar.
 - Não se conecta diretamente ao aplicativo LocalSend.

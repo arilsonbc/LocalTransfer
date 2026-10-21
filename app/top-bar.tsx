@@ -5,13 +5,13 @@ import {ArrowLeftRight,ExternalLink,CodeXml,HelpCircle,Mail,X} from "lucide-reac
 import ThemeSwitch from "./theme-switch";
 
 const questions=[
-  ["Como envio meus arquivos?","No aparelho com os arquivos, escolha Enviar arquivos e selecione o que deseja enviar. No outro aparelho, abra este site, escolha Receber arquivos e digite o código. Confirme o recebimento para começar."],
+  ["Como envio meus arquivos?","No aparelho com os arquivos, escolha Enviar arquivos e selecione o que deseja enviar. No outro aparelho, use o link de convite, leia o QR Code com a câmera ou escolha Receber arquivos e digite o código. Confirme o recebimento para começar."],
   ["Preciso instalar algum aplicativo ou criar uma conta?","Não. Abra o site no navegador dos dois aparelhos. Funciona no computador, Android e iPhone, sem instalação ou login."],
   ["Os aparelhos precisam estar no mesmo Wi-Fi?","Não. Você pode usar Wi-Fi ou rede móvel, inclusive 4G e 5G. Quando a conexão direta não é possível, o serviço TURN da Cloudflare ajuda a conectar os aparelhos."],
   ["Qual é o limite de tamanho?","Você pode enviar até 500 arquivos e 100 GB por vez. Para receber mais de 200 MB, use Chrome ou Edge no computador e escolha uma pasta com espaço livre. Navegadores sem gravação direta em pasta continuam limitados a 200 MB no recebimento."],
   ["Onde meus arquivos ficam salvos?","Em envios pequenos, toque em Salvar em cada arquivo recebido. Em envios grandes, os arquivos são gravados durante a transferência em uma subpasta LocalTransfer dentro da pasta que você escolher. No iPhone, use o menu de compartilhar para salvar em Arquivos ou Fotos, conforme o tipo de arquivo."],
   ["Os arquivos ficam guardados no servidor?","Não. A transferência é criptografada pelo WebRTC. Os arquivos passam diretamente entre os aparelhos ou pelo retransmissor TURN; o LocalTransfer não mantém uma cópia deles no servidor. Compartilhe o código apenas com quem deve receber."],
-  ["O que faço se a transferência parar?","Mantenha as páginas abertas e os aparelhos ativos até terminar. Confira a internet e o espaço livre no aparelho que recebe. Se a conexão cair, crie outra sala e envie novamente: ainda não há retomada de transferências interrompidas."],
+  ["O que faço se a transferência parar?","Mantenha as páginas abertas e os aparelhos ativos até terminar. Confira a internet e o espaço livre no aparelho que recebe. Se a internet oscilar, o site tenta reconectar automaticamente e retoma do último byte recebido, por até dois minutos. Não feche nem recarregue as páginas, não cancele a transferência e mantenha os arquivos selecionados. Se o navegador encerrar a página ou as tentativas terminarem, será necessário criar outra sala."],
 ];
 
 export default function TopBar({onHome}:{onHome:()=>void}) {

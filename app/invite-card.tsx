@@ -1,6 +1,6 @@
 "use client";
 import {useEffect,useState} from "react";
-import {Check,Copy,Link as LinkIcon,QrCode,Share2} from "lucide-react";
+import {Check,Link as LinkIcon,QrCode,Share2} from "lucide-react";
 import {makeInvite} from "../lib/invite";
 
 export default function InviteCard({code}:{code:string}) {
