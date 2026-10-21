@@ -362,6 +362,15 @@ test('pausa suspende timeout de confirmacoes e cancelamento libera espera',async
     await assert.rejects(()=>blocked,/cancelada/);
   }finally{p.left.close();p.right.close();}
 });
+test('pausar atualiza bytes mesmo antes do intervalo normal de renderizacao',()=>{
+  const p=pair(),shown=[];
+  try{
+    p.left.outgoing=true;p.left.peerPause=true;p.left.hooks.progress=(_name,bytes)=>shown.push(bytes);
+    p.left.progress('arquivo.bin',0,1048576,'send');p.left.lastProgressAt=Date.now();
+    p.left.progress('arquivo.bin',16384,1048576,'send');assert.equal(shown.at(-1),0);
+    p.left.setPaused(true);assert.equal(shown.at(-1),16384);
+  }finally{p.left.close();p.right.close();}
+});
 
 test('retomada preserva bytes de um arquivo parcial e não repete os arquivos concluídos',async()=>{
   const received=[],opened=[];let dropped=false,resumedOffset=0;
