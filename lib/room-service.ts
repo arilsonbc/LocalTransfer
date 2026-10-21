@@ -34,11 +34,11 @@ export async function body(request: Request): Promise<Record<string, unknown>> {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Solicitação inválida.");
   return data;
 }
-export async function allowed(store: RoomStore, request: Request, action: string, max: number) {
+export async function allowed(store: RoomStore, request: Request, action: string, max: number, windowSeconds=60) {
   const now = Date.now();
   const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
-  const key = await hash(`${ip}:${action}:${Math.floor(now / 60000)}`);
-  return store.allow(key, max);
+  const key = await hash(`${ip}:${action}:${Math.floor(now / (windowSeconds*1000))}`);
+  return store.allow(key, max,windowSeconds*2);
 }
 export async function authenticate(store: RoomStore, code: string, request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer /, "") || "";

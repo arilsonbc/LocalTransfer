@@ -20,7 +20,7 @@ export async function POST(request:Request, context:{params:Promise<{code:string
     if(usage.status==="limit"||usage.status==="unavailable"||process.env.TURN_ENABLED==="false")
       return json({iceServers:STUN_ONLY,turn:{status:process.env.TURN_ENABLED==="false"?"paused":usage.status,notice:notice||"A retransmissão está temporariamente pausada. Tente conectar os aparelhos na mesma rede Wi-Fi."}});
     if(!await store.allow(`ice-session:${code}:${auth.role}`,6,172800)||
-       !await allowed(store,request,`ice-hour:${hour}`,60)||
+       !await allowed(store,request,"ice-hour",60,3600)||
        !await store.allow(`ice-global:${hour}`,600,7200))
       return json({error:"O limite de novas conexões foi atingido. Aguarde e tente novamente."},429);
     return json({iceServers:await generateIceServers(),turn:{status:usage.status,notice}});
