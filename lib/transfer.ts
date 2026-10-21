@@ -8,6 +8,7 @@ export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Pr
 export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string};
 export type Offer = {id:string;files:FileInfo[]};
+type ResumePoint={index:number;offset:number};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
@@ -47,10 +48,14 @@ export class TransferConnection {
   private transferEpoch=0;
   private peerFlow=false;
   private incomingFlow=false;
+  private incomingResume=false;
+  private peerResume=false;
+  private completedOffer:Offer|null=null;
+  private completedAt=0;
   private receiveIndex=0;
   private outgoing=false;
   private cancelled=false;
-  private pending=new Map<string,{resolve:()=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
+  private pending=new Map<string,{resolve:(value?:unknown)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
   private queue=Promise.resolve();
   private queuedBytes=0;
   private lastProgressAt=0;
@@ -131,6 +136,7 @@ export class TransferConnection {
   }
   retry(){
     if(this.stopped || this.completed || this.negotiating || this.retryTimer)return;
+    if(this.completedOffer && !this.incoming && !this.outgoing)return;
     if(this.retries>=3){this.fail("Não foi possível recuperar a conexão. Confira a internet nos dois aparelhos e crie outra sala.");return;}
     this.retries++;this.pauseTransport();
     this.retryTimer=setTimeout(()=>{
@@ -174,6 +180,7 @@ export class TransferConnection {
   }
   private async poll() {
     if(this.stopped || this.completed || this.polling)return;
+    if(this.completedAt && Date.now()-this.completedAt>120000 && !this.incoming && !this.outgoing){this.completed=true;return;}
     this.polling=true;
     let negotiatingHere=false;
     try {
@@ -237,16 +244,20 @@ export class TransferConnection {
     };
   }
   private control(value:unknown) {
-    if(this.stopped||this.channel?.readyState!=="open") throw new Error("O aparelho não está conectado.");
+    if(this.stopped)throw new Error("Transferência encerrada.");
+    if(this.recovering || this.channel?.readyState!=="open") throw new TransportInterrupted("Reconectando…");
     this.channel.send(JSON.stringify(value));
   }
-  private wait(key:string,timeout=120000) {
-    return new Promise<void>((resolve,reject)=>{
+  private wait<T=void>(key:string,timeout=120000) {
+    const promise=new Promise<T>((resolve,reject)=>{
       const timer=setTimeout(()=>{this.pending.delete(key);reject(new Error("O outro aparelho não respondeu. Tente novamente."));},timeout);
-      this.pending.set(key,{resolve,reject,timer});
+      this.pending.set(key,{resolve:value=>resolve(value as T),reject,timer});
     });
+    // A transport can close between registering a response and sending its request.
+    void promise.catch(()=>{});
+    return promise;
   }
-  private resolve(key:string) {const p=this.pending.get(key);if(p){clearTimeout(p.timer);p.resolve();this.pending.delete(key);}}
+  private resolve(key:string,value?:unknown) {const p=this.pending.get(key);if(p){clearTimeout(p.timer);p.resolve(value);this.pending.delete(key);}}
   private rejectAll(message:string|Error) {for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(typeof message==="string"?new Error(message):message);}this.pending.clear();}
   private async message(data:string|ArrayBuffer|Blob) {
     if(typeof data!=="string") {
@@ -265,15 +276,26 @@ export class TransferConnection {
     const msg=JSON.parse(data);
     switch(msg.type) {
       case "offer": {
-        if(!validateOffer(msg.offer) || this.busy) {this.control({type:"reject",reason:this.busy?"O aparelho está ocupado.":"Lote inválido ou maior que 100 GB."});return;}
-        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.accepted=false;this.receiveIndex=0;this.meter.reset();
+        if(!validateOffer(msg.offer)){this.control({type:"reject",reason:"Lote inválido ou maior que 100 GB."});return;}
+        if(this.completedOffer?.id===msg.offer.id && JSON.stringify(this.completedOffer)===JSON.stringify(msg.offer)){
+          this.control({type:"accept",flowControl:1,resume:1,index:msg.offer.files.length,offset:0});return;
+        }
+        if(this.incoming?.id===msg.offer.id && JSON.stringify(this.incoming)===JSON.stringify(msg.offer)){
+          if(this.accepted)this.sendAcceptance();else this.hooks.offer(this.incoming);
+          return;
+        }
+        if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
+        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
         this.hooks.offer(this.incoming);return;
       }
-      case "accept": this.peerFlow=msg.flowControl===1;this.resolve("accept");return;
+      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
         const info=this.incoming?.files[this.receiveIndex];
-        if(!this.accepted || this.receiving || !info || msg.id!==info.id)throw new Error("Sequência de arquivos inválida.");
+        if(!this.accepted || !info || msg.id!==info.id)throw new Error("Sequência de arquivos inválida.");
+        const offset=msg.offset??0;
+        if(this.receiving && this.incomingResume && this.receiving.info.id===info.id && offset===this.receiving.bytes){this.progress(info.name,offset,info.size,"receive");return;}
+        if(this.receiving || offset!==0)throw new Error("Ponto de retomada inválido.");
         const epoch=this.transferEpoch;
         const sink=this.sinkFactory?await this.sinkFactory(info,this.receiveIndex):null;
         if(this.stopped || epoch!==this.transferEpoch){await sink?.abort().catch(()=>{});return;}
@@ -289,9 +311,21 @@ export class TransferConnection {
       }
       case "ack": this.resolve(`ack:${msg.id}`);return;
       case "flow": if(typeof msg.id==="string" && Number.isSafeInteger(msg.bytes))this.resolve(`flow:${msg.id}:${msg.bytes}`);return;
+      case "done-ack": if(this.outgoingOffer?.id===msg.id)this.resolve("done");return;
+      case "done-confirm": if(this.completedOffer?.id===msg.id)this.completed=true;return;
       case "done": {
+        if(this.completedOffer?.id===msg.id){this.control({type:"done-ack",id:msg.id});return;}
         if(!this.incoming || !this.accepted || this.receiving || this.receiveIndex!==this.incoming.files.length)throw new Error("Transferência incompleta.");
-        const count=this.incoming.files.length;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.hooks.complete("receive",count);return;
+        const count=this.incoming.files.length;
+        const acknowledge=this.incomingResume;
+        const completedId=this.incoming.id;
+        if(acknowledge){
+          if(msg.id!==this.incoming.id)throw new Error("Confirmação de lote inválida.");
+          this.completedOffer=this.incoming;this.completedAt=Date.now();
+        }else this.completed=true;
+        this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.hooks.complete("receive",count);
+        if(acknowledge)this.control({type:"done-ack",id:completedId});
+        return;
       }
       case "cancel": this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
     }
@@ -304,18 +338,20 @@ export class TransferConnection {
       this.reject();this.hooks.error(message);return;
     }
     this.sinkFactory=sinkFactory||null;
-    this.accepted=true;this.hooks.offer(null);this.control({type:"accept",flowControl:this.incomingFlow?1:0});
+    this.accepted=true;this.hooks.offer(null);this.sendAcceptance();
   }
+  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
   private async drain() {
     const c=this.channel;
-    if(!c || this.stopped || this.cancelled || c.readyState!=="open")throw new Error("Transferência interrompida.");
+    if(this.stopped || this.cancelled)throw new Error("Transferência interrompida.");
+    if(!c || this.recovering || c.readyState!=="open")throw new TransportInterrupted("Reconectando…");
     if(c.bufferedAmount<=262144)return;
     await new Promise<void>((resolve,reject)=>{
       const cleanup=()=>{clearTimeout(timer);c.removeEventListener("bufferedamountlow",low);c.removeEventListener("close",closed);};
-      const low=()=>{cleanup();resolve();};const closed=()=>{cleanup();reject(new Error("Conexão encerrada."));};
+      const low=()=>{cleanup();resolve();};const closed=()=>{cleanup();reject(new TransportInterrupted("Reconectando…"));};
       const timer=setTimeout(()=>{cleanup();reject(new Error("O envio demorou demais. Tente novamente."));},30000);
       c.addEventListener("bufferedamountlow",low,{once:true});c.addEventListener("close",closed,{once:true});
       if(c.bufferedAmount<=65536)low();
@@ -325,19 +361,52 @@ export class TransferConnection {
     if(this.busy)throw new Error("Aguarde a transferência atual terminar.");
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
-    this.outgoing=true;this.cancelled=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
+    this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
     try {
-      const accept=this.wait("accept",600000);this.control({type:"offer",offer,flowControl:1});
-      await accept;
-      for(let i=0;i<files.length;i++) {
+      for(let attempt=0;;attempt++){
+        try{await this.sendAttempt(files,offer);break;}
+        catch(error){
+          if(!(error instanceof TransportInterrupted) || this.stopped || this.cancelled || attempt>=5)throw error;
+          if(!this.recovering)this.retry();
+          await this.waitForChannel();
+        }
+      }
+      this.completed=true;this.hooks.complete("send",files.length);
+    } catch(e) {
+      if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
+      throw e;
+    } finally {this.outgoing=false;this.outgoingOffer=null;}
+  }
+  private async waitForChannel(){
+    while(true){
+      if(this.stopped || this.cancelled)throw new Error("Transferência encerrada.");
+      if(this.channel?.readyState==="open" && !this.recovering)return;
+      try{await this.wait("ready",120000);}catch(error){if(!(error instanceof TransportInterrupted))throw error;}
+    }
+  }
+  private checkTransport(generation:number){
+    if(this.stopped || this.cancelled)throw new Error("Transferência cancelada.");
+    if(generation!==this.transportGeneration || this.recovering || this.channel?.readyState!=="open")throw new TransportInterrupted("Reconectando…");
+  }
+  private async sendAttempt(files:File[],offer:Offer){
+      await this.waitForChannel();
+      const generation=this.transportGeneration;
+      const accept=this.wait<ResumePoint>("accept",600000);
+      this.control({type:"offer",offer,flowControl:1,resume:1});
+      const point=await accept;
+      this.checkTransport(generation);
+      if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
+      for(let i=point.index;i<files.length;i++) {
         this.sendIndex=i;
         const file=files[i],info=offer.files[i];
-        if(this.cancelled)throw new Error("Transferência cancelada.");
-        this.control({type:"file",id:info.id});
-        for(let offset=0;offset<file.size;offset+=CHUNK_SIZE) {
+        this.checkTransport(generation);
+        const start=i===point.index?point.offset:0;
+        this.control({type:"file",id:info.id,offset:start});
+        this.progress(file.name,start,file.size,"send");
+        for(let offset=start;offset<file.size;offset+=CHUNK_SIZE) {
           const chunk=await file.slice(offset,offset+CHUNK_SIZE).arrayBuffer();
           await this.drain();
-          if(this.cancelled)throw new Error("Transferência cancelada.");
+          this.checkTransport(generation);
           const current=Math.min(offset+chunk.byteLength,file.size);
           const confirmation=this.peerFlow && (current%FLOW_WINDOW===0 || current===file.size)?this.wait(`flow:${info.id}:${current}`,120000):null;
           this.channel!.send(chunk);
@@ -346,17 +415,16 @@ export class TransferConnection {
         }
         const ack=this.wait(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id});await ack;
       }
-      this.control({type:"done"});this.hooks.complete("send",files.length);
-    } catch(e) {
-      if(!this.stopped && this.channel?.readyState==="open")this.control({type:"cancel"});
-      throw e;
-    } finally {this.outgoing=false;this.outgoingOffer=null;}
+      this.checkTransport(generation);
+      const done=this.peerResume?this.wait("done",60000):null;
+      this.control({type:"done",id:offer.id});
+      if(done){await done;this.checkTransport(generation);this.control({type:"done-confirm",id:offer.id});}
   }
   private resetTransfer() {
     this.transferEpoch++;
     this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
   }
-  cancel() {if(this.channel?.readyState==="open")this.control({type:"cancel"});this.resetTransfer();}
+  cancel() {if(!this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});this.resetTransfer();}
   private fail(message:string) {if(this.stopped)return;this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
   close() {
     this.stopped=true;

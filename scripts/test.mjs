@@ -277,6 +277,51 @@ function pair(accept=true,sink){
   left.bind(lc);right.bind(rc);
   return {left,right,blobs,errors,completions};
 }
+function reconnectTransport(p){
+  p.left.pauseTransport();p.right.pauseTransport();
+  const oldLeft=p.left.channel,oldRight=p.right.channel;
+  p.left.transportGeneration++;p.right.transportGeneration++;
+  p.left.channel=null;p.right.channel=null;oldLeft.close();oldRight.close();
+  setTimeout(()=>{
+    const left=new MockChannel(),right=new MockChannel();left.peer=right;right.peer=left;
+    p.left.bind(left);p.right.bind(right);left.onopen();right.onopen();
+  },5);
+}
+
+test('retomada preserva bytes de um arquivo parcial e não repete os arquivos concluídos',async()=>{
+  const received=[],opened=[];let dropped=false,resumedOffset=0;
+  const p=pair(true,async(info,index)=>{
+    opened.push(index);const chunks=[];
+    return {async write(chunk){chunks.push(new Uint8Array(chunk));if(index===1 && !dropped && chunks.length===40){dropped=true;setTimeout(()=>reconnectTransport(p),0);}},async close(){received[index]=Buffer.concat(chunks);},async abort(){throw new Error('Uma queda transitória não deve abortar o disco');}};
+  });
+  const originalMessage=p.right.message.bind(p.right);
+  p.right.message=async data=>{if(typeof data==='string'){const message=JSON.parse(data);if(message.type==='file'&&message.offset>0)resumedOffset=message.offset;}return originalMessage(data);};
+  const bytes=Buffer.alloc(2*transfer.FLOW_WINDOW+37);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
+  const first=Buffer.from('arquivo já concluído');
+  try {
+    await p.left.send([new File([first],'primeiro.txt'),new File([bytes],'segundo.bin')]);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert.ok(dropped);assert.ok(resumedOffset>0);assert.deepEqual(opened,[0,1]);
+    assert.deepEqual(received[0],first);assert.deepEqual(received[1],bytes);
+    assert.equal(p.blobs.length,2);assert.equal(p.completions.filter(c=>c.direction==='receive').length,1);
+  } finally {p.left.close();p.right.close();}
+});
+
+test('perda da confirmação final reconecta sem entregar arquivos duplicados',async()=>{
+  const p=pair();let dropped=false;
+  const original=p.right.channel.send.bind(p.right.channel);
+  p.right.channel.send=value=>{
+    if(typeof value==='string' && JSON.parse(value).type==='done-ack' && !dropped){dropped=true;setTimeout(()=>reconnectTransport(p),0);return;}
+    original(value);
+  };
+  try {
+    await p.left.send([new File(['conteúdo'],'arquivo.txt')]);
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert.ok(dropped);assert.equal(p.blobs.length,1);
+    assert.equal(p.completions.filter(c=>c.direction==='receive').length,1);
+    assert.equal(await p.blobs[0].blob.text(),'conteúdo');
+  } finally {p.left.close();p.right.close();}
+});
 test('transferência em blocos preserva bytes, arquivos vazios e confirmação',async()=>{
   const p=pair();const bytes=new Uint8Array(1024*1024+37);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
   const files=[new File([bytes],'foto-teste.bin',{type:'application/octet-stream'}),new File([],'vazio.txt')];
