@@ -15,10 +15,11 @@ export async function POST(request:Request, context:{params:Promise<{code:string
     const hour=Math.floor(Date.now()/3600000);
     // Unlike the per-room limiter, this cannot be reset by creating another room.
     if(!await allowed(store,request,"ice:all-rooms",10))return json({error:"Muitas tentativas de conexão. Aguarde um minuto."},429);
+    if(process.env.TURN_ENABLED==="false")return json({iceServers:STUN_ONLY,turn:{status:"paused",notice:"A retransmissão está temporariamente pausada. Tente conectar os aparelhos na mesma rede Wi-Fi."}});
     const usage=await readTurnUsage(store);
     const notice=turnNotice(usage);
-    if(usage.status==="limit"||usage.status==="unavailable"||process.env.TURN_ENABLED==="false")
-      return json({iceServers:STUN_ONLY,turn:{status:process.env.TURN_ENABLED==="false"?"paused":usage.status,notice:notice||"A retransmissão está temporariamente pausada. Tente conectar os aparelhos na mesma rede Wi-Fi."}});
+    if(usage.status==="limit"||usage.status==="unavailable")
+      return json({iceServers:STUN_ONLY,turn:{status:usage.status,notice}});
     if(!await store.allow(`ice-session:${code}:${auth.role}`,6,172800)||
        !await allowed(store,request,"ice-hour",60,3600)||
        !await store.allow(`ice-global:${hour}`,600,7200))
