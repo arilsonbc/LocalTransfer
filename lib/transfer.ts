@@ -13,6 +13,7 @@ type ResumePoint={index:number;offset:number};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
+  pause?:(local:boolean,remote:boolean,supported:boolean)=>void;
   notice?:(message:string)=>void;
   integrity?:(id:string,verified:boolean)=>void;
   state:(state:string,message:string)=>void;
@@ -37,6 +38,7 @@ export async function api<T=Record<string,unknown>>(path:string,method="GET",dat
   return result as T;
 }
 class TransportInterrupted extends Error {}
+type PendingWait={resolve:(value?:unknown)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>|undefined;remaining:number;started:number;arm:()=>void};
 
 export class TransferConnection {
   private pc!:RTCPeerConnection;
@@ -56,12 +58,16 @@ export class TransferConnection {
   private incomingIntegrity=false;
   private peerIntegrity=false;
   private sendingHash:{index:number;hash:SendingIntegrity}|null=null;
+  private localPaused=false;
+  private remotePaused=false;
+  private peerPause=false;
+  private incomingPause=false;
   private completedOffer:Offer|null=null;
   private completedAt=0;
   private receiveIndex=0;
   private outgoing=false;
   private cancelled=false;
-  private pending=new Map<string,{resolve:(value?:unknown)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
+  private pending=new Map<string,PendingWait>();
   private queue=Promise.resolve();
   private queuedBytes=0;
   private lastProgressAt=0;
@@ -105,6 +111,29 @@ export class TransferConnection {
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
+  get paused(){return this.localPaused||this.remotePaused;}
+  get pauseSupported(){return this.outgoing?this.peerPause:this.incomingPause&&this.accepted;}
+  private updatePause(local=this.localPaused,remote=this.remotePaused){
+    const was=this.paused;this.localPaused=local;this.remotePaused=remote;
+    if(was!==this.paused){
+      this.meter.reset();
+      for(const p of this.pending.values()){
+        if(this.paused && p.timer!==undefined){clearTimeout(p.timer);p.timer=undefined;p.remaining=Math.max(1,p.remaining-(Date.now()-p.started));}
+        else if(!this.paused && p.timer===undefined)p.arm();
+      }
+      if(!this.paused)this.resolve("unpaused");
+    }
+    this.hooks.pause?.(this.localPaused,this.remotePaused,this.pauseSupported);
+  }
+  setPaused(value:boolean){
+    if(!this.busy||!this.pauseSupported||this.stopped)return;
+    this.updatePause(value);
+    if(!this.recovering&&this.channel?.readyState==="open")this.control({type:"pause",id:(this.outgoingOffer||this.incoming)?.id,paused:value});
+  }
+  private async waitIfPaused(){
+    if(this.paused)await this.wait("unpaused",172800000);
+    if(this.stopped||this.cancelled)throw new Error("Transferência cancelada.");
+  }
   get reconnecting(){return this.recovering || (!this.completed && ["failed","disconnected"].includes(this.pc?.connectionState));}
   get diagnostics():ConnectionDiagnostics {
     return this.failureDiagnostics||{version:"recovery-v3",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
@@ -261,8 +290,10 @@ export class TransferConnection {
   }
   private wait<T=void>(key:string,timeout=120000) {
     const promise=new Promise<T>((resolve,reject)=>{
-      const timer=setTimeout(()=>{this.pending.delete(key);reject(new Error("O outro aparelho não respondeu. Tente novamente."));},timeout);
-      this.pending.set(key,{resolve:value=>resolve(value as T),reject,timer});
+      const pending:PendingWait={resolve:value=>resolve(value as T),reject,timer:undefined,remaining:timeout,started:Date.now(),arm:()=>{
+        pending.started=Date.now();pending.timer=setTimeout(()=>{this.pending.delete(key);reject(new Error("O outro aparelho não respondeu. Tente novamente."));},pending.remaining);
+      }};
+      this.pending.set(key,pending);if(!this.paused)pending.arm();
     });
     // A transport can close between registering a response and sending its request.
     void promise.catch(()=>{});
@@ -290,17 +321,20 @@ export class TransferConnection {
       case "offer": {
         if(!validateOffer(msg.offer)){this.control({type:"reject",reason:"Lote inválido ou maior que 100 GB."});return;}
         if(this.completedOffer?.id===msg.offer.id && JSON.stringify(this.completedOffer)===JSON.stringify(msg.offer)){
-          this.control({type:"accept",flowControl:1,resume:1,integrity:this.incomingIntegrity?"sha256":undefined,index:msg.offer.files.length,offset:0});return;
+          this.control({type:"accept",flowControl:1,resume:1,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:msg.offer.files.length,offset:0});return;
         }
         if(this.incoming?.id===msg.offer.id && JSON.stringify(this.incoming)===JSON.stringify(msg.offer)){
+          if(this.incomingPause)this.updatePause(undefined,msg.paused===true);
           if(this.accepted)this.sendAcceptance();else this.hooks.offer(this.incoming);
           return;
         }
         if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
         this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
+        this.incomingPause=msg.pause===1;this.updatePause(false,false);
         this.hooks.offer(this.incoming);return;
       }
-      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
+      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.peerPause=msg.pause===1;this.updatePause(undefined,this.peerPause&&msg.paused===true);this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
+      case "pause": if(this.busy&&this.pauseSupported&&msg.id===(this.outgoingOffer||this.incoming)?.id&&typeof msg.paused==="boolean")this.updatePause(undefined,msg.paused);return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
         const info=this.incoming?.files[this.receiveIndex];
@@ -337,7 +371,7 @@ export class TransferConnection {
           if(msg.id!==this.incoming.id)throw new Error("Confirmação de lote inválida.");
           this.completedOffer=this.incoming;this.completedAt=Date.now();
         }else this.completed=true;
-        this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.hooks.complete("receive",count);
+        this.incoming=null;this.accepted=false;this.sinkFactory=null;this.updatePause(false,false);this.hooks.offer(null);this.hooks.complete("receive",count);
         if(acknowledge)this.control({type:"done-ack",id:completedId});
         return;
       }
@@ -352,9 +386,9 @@ export class TransferConnection {
       this.reject();this.hooks.error(message);return;
     }
     this.sinkFactory=sinkFactory||null;
-    this.accepted=true;this.hooks.offer(null);this.sendAcceptance();
+    this.accepted=true;this.updatePause(false,false);this.hooks.offer(null);this.sendAcceptance();
   }
-  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
+  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
@@ -376,6 +410,7 @@ export class TransferConnection {
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
     this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
+    this.peerPause=false;this.updatePause(false,false);
     try {
       for(let attempt=0;;attempt++){
         try{await this.sendAttempt(files,offer);break;}
@@ -389,7 +424,7 @@ export class TransferConnection {
     } catch(e) {
       if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
-    } finally {this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;}
+    } finally {this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;this.updatePause(false,false);}
   }
   private async waitForChannel(){
     while(true){
@@ -406,7 +441,7 @@ export class TransferConnection {
       await this.waitForChannel();
       const generation=this.transportGeneration;
       const accept=this.wait<ResumePoint>("accept",600000);
-      this.control({type:"offer",offer,flowControl:1,resume:1,integrity:"sha256"});
+      this.control({type:"offer",offer,flowControl:1,resume:1,pause:1,paused:this.localPaused,integrity:"sha256"});
       const point=await accept;
       this.checkTransport(generation);
       if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
@@ -418,12 +453,15 @@ export class TransferConnection {
         const start=i===point.index?point.offset:0;
         if(this.sendingHash?.index!==i)this.sendingHash={index:i,hash:new SendingIntegrity()};
         const hash=this.sendingHash.hash;
-        if(this.peerIntegrity)await hash.seek(file,start,async()=>this.checkTransport(generation));
+        if(this.peerIntegrity)await hash.seek(file,start,async()=>{await this.waitIfPaused();this.checkTransport(generation);});
+        await this.waitIfPaused();this.checkTransport(generation);
         this.control({type:"file",id:info.id,offset:start});
         this.progress(file.name,start,file.size,"send");
         for(let offset=start;offset<file.size;offset+=CHUNK_SIZE) {
+          await this.waitIfPaused();this.checkTransport(generation);
           const chunk=await file.slice(offset,offset+CHUNK_SIZE).arrayBuffer();
           await this.drain();
+          await this.waitIfPaused();
           this.checkTransport(generation);
           if(this.peerIntegrity)hash.update(chunk);
           const current=Math.min(offset+chunk.byteLength,file.size);
@@ -432,17 +470,19 @@ export class TransferConnection {
           if(confirmation)await confirmation;
           this.progress(file.name,current,file.size,"send");
         }
+        await this.waitIfPaused();this.checkTransport(generation);
         const ack=this.wait<boolean>(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id,sha256:this.peerIntegrity?hash.digest():undefined});
         const verified=await ack;
         if(this.peerIntegrity&&!verified)throw new Error("O outro aparelho não confirmou a integridade do arquivo. Atualize as duas páginas e tente novamente.");
         this.hooks.integrity?.(info.id,this.peerIntegrity&&verified);
       }
-      this.checkTransport(generation);
+      await this.waitIfPaused();this.checkTransport(generation);
       const done=this.peerResume?this.wait("done",60000):null;
       this.control({type:"done",id:offer.id});
       if(done){await done;this.checkTransport(generation);this.control({type:"done-confirm",id:offer.id});}
   }
   private resetTransfer() {
+    this.updatePause(false,false);
     this.transferEpoch++;
     this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
   }
