@@ -16,6 +16,7 @@ const transferUrl=source('lib/transfer.ts');
 const transfer=await import(transferUrl);
 const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
 const invite=await import(source('lib/invite.ts'));
+const progress=await import(source('lib/progress.ts'));
 const records=new Map(),counts=new Map();
 const db={
   async create(row){if(records.has(row.code))return false;records.set(row.code,structuredClone(row));return true;},
@@ -46,6 +47,18 @@ test('convites aceitam código ou link e não incluem tokens ou parâmetros extr
   assert.equal(invite.readInvite('https://localtransfer.test/#token=segredo'),null);
   assert.equal(invite.readInvite('<script>'),null);
   assert.throws(()=>invite.makeInvite('https://localtransfer.test','invalid'));
+});
+
+test('estimativa de velocidade usa o lote inteiro e reinicia depois de uma retomada',()=>{
+  const meter=new progress.ProgressMeter();
+  assert.equal(meter.sample(0,10000,1,2,100).secondsRemaining,null);
+  const measured=meter.sample(2000,10000,1,2,1100);
+  assert.equal(measured.bytesPerSecond,2000);assert.equal(measured.percent,20);assert.equal(measured.secondsRemaining,4);
+  assert.equal(meter.sample(1000,10000,1,2,1600).secondsRemaining,null);
+  assert.equal(meter.sample(10000,10000,2,2,2100).percent,100);
+  assert.equal(progress.formatRemaining(null),'Calculando tempo restante…');
+  assert.match(progress.formatRemaining(120),/2 min/);
+  assert.match(progress.formatRemaining(7200),/2 h/);
 });
 
 test('códigos aleatórios, normalização e tokens',async()=>{
