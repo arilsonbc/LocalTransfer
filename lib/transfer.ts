@@ -5,7 +5,7 @@ export const MAX_MEMORY = 200 * 1024 * 1024;
 export const MAX_FILES = 500;
 export const CHUNK_SIZE = 16 * 1024;
 export const FLOW_WINDOW = 1024 * 1024;
-export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Promise<void>;abort:()=>Promise<void>};
+export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Promise<void>;abort:()=>Promise<void>;preview?:()=>Promise<Blob|null>};
 export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string;integrity?:"verified"|"unavailable"};
 export type Offer = {id:string;files:FileInfo[]};
@@ -20,7 +20,7 @@ type Hooks = {
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
   progress:(name:string,current:number,total:number,direction:"send"|"receive",stats?:TransferStats)=>void;
-  file:(file:FileInfo,blob:Blob|null)=>void;
+  file:(file:FileInfo,blob:Blob|null,preview?:Blob|null)=>void;
   complete:(direction:"send"|"receive",count:number)=>void;
   error:(message:string)=>void;
 };
@@ -354,7 +354,10 @@ export class TransferConnection {
           throw new Error("A verificação de integridade falhou. O arquivo não foi concluído; envie-o novamente.");
         if(r.sink)await r.sink.close();
         if(this.receiving!==r)return;
-        this.hooks.file({...r.info,integrity:this.incomingIntegrity?"verified":"unavailable"},r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}));
+        // A failed preview must never turn a successfully verified file into a failed transfer.
+        const preview=r.sink?.preview?await r.sink.preview().catch(()=>null):null;
+        if(this.receiving!==r)return;
+        this.hooks.file({...r.info,integrity:this.incomingIntegrity?"verified":"unavailable"},r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}),preview);
         this.receiving=null;this.receiveIndex++;this.control({type:"ack",id:msg.id,integrity:this.incomingIntegrity?"sha256":undefined});return;
       }
       case "ack": this.resolve(`ack:${msg.id}`,msg.integrity==="sha256");return;

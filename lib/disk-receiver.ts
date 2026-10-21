@@ -1,4 +1,5 @@
 import {safeFilename,type SinkFactory} from "./transfer";
+import {canPreviewPhoto} from "./photo-preview";
 
 type PickerWindow = Window & {showDirectoryPicker?:(options:{mode:"readwrite"})=>Promise<FileSystemDirectoryHandle>};
 export function canSaveToDisk() {
@@ -15,6 +16,6 @@ export async function chooseReceiveFolder():Promise<{name:string;open:SinkFactor
     const filename=`${String(index+1).padStart(3,"0")}-${safeFilename(file.name).replace(/[. ]+$/,"")||"arquivo"}`;
     const handle=await folder.getFileHandle(filename,{create:true});
     const stream=await handle.createWritable();
-    return {write:chunk=>stream.write(chunk),close:()=>stream.close(),abort:()=>stream.abort()};
+    return {write:chunk=>stream.write(chunk),close:()=>stream.close(),abort:()=>stream.abort(),preview:async()=>canPreviewPhoto(file.type,file.size)?handle.getFile():null};
   }};
 }
