@@ -71,6 +71,7 @@ export class TransferConnection {
   private queue=Promise.resolve();
   private queuedBytes=0;
   private lastProgressAt=0;
+  private latestProgress:{name:string;current:number;total:number;direction:"send"|"receive"}|null=null;
   private requiresRelay=false;
   private serverErrors:number[]=[];
   private failureDiagnostics:ConnectionDiagnostics|null=null;
@@ -122,6 +123,7 @@ export class TransferConnection {
         else if(!this.paused && p.timer===undefined)p.arm();
       }
       if(!this.paused)this.resolve("unpaused");
+      if(this.latestProgress){const p=this.latestProgress;this.lastProgressAt=0;this.progress(p.name,p.current,p.total,p.direction);}
     }
     this.hooks.pause?.(this.localPaused,this.remotePaused,this.pauseSupported);
   }
@@ -139,6 +141,7 @@ export class TransferConnection {
     return this.failureDiagnostics||{version:"recovery-v3",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
   }
   private progress(name:string,current:number,total:number,direction:"send"|"receive") {
+    this.latestProgress={name,current,total,direction};
     const now=Date.now();
     if(current===0 || current===total || now-this.lastProgressAt>=100){
       this.lastProgressAt=now;
@@ -485,6 +488,7 @@ export class TransferConnection {
       if(done){await done;this.checkTransport(generation);this.control({type:"done-confirm",id:offer.id});}
   }
   private resetTransfer() {
+    this.latestProgress=null;
     this.updatePause(false,false);
     this.transferEpoch++;
     this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
