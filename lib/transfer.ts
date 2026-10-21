@@ -1,4 +1,5 @@
 import {ProgressMeter,type TransferStats} from "./progress";
+import {newSha256,digestHex,SendingIntegrity} from "./integrity";
 export const MAX_BATCH = 100_000_000_000;
 export const MAX_MEMORY = 200 * 1024 * 1024;
 export const MAX_FILES = 500;
@@ -6,13 +7,14 @@ export const CHUNK_SIZE = 16 * 1024;
 export const FLOW_WINDOW = 1024 * 1024;
 export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Promise<void>;abort:()=>Promise<void>};
 export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
-export type FileInfo = {id:string;name:string;size:number;type:string};
+export type FileInfo = {id:string;name:string;size:number;type:string;integrity?:"verified"|"unavailable"};
 export type Offer = {id:string;files:FileInfo[]};
 type ResumePoint={index:number;offset:number};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
   notice?:(message:string)=>void;
+  integrity?:(id:string,verified:boolean)=>void;
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
@@ -44,13 +46,16 @@ export class TransferConnection {
   private connectTimer:ReturnType<typeof setTimeout>|null=null;
   private incoming:Offer|null=null;
   private accepted=false;
-  private receiving:{info:FileInfo;chunks:ArrayBuffer[];bytes:number;sink:ReceiveSink|null}|null=null;
+  private receiving:{info:FileInfo;chunks:ArrayBuffer[];bytes:number;sink:ReceiveSink|null;hash:ReturnType<typeof newSha256>}|null=null;
   private sinkFactory:SinkFactory|null=null;
   private transferEpoch=0;
   private peerFlow=false;
   private incomingFlow=false;
   private incomingResume=false;
   private peerResume=false;
+  private incomingIntegrity=false;
+  private peerIntegrity=false;
+  private sendingHash:{index:number;hash:SendingIntegrity}|null=null;
   private completedOffer:Offer|null=null;
   private completedAt=0;
   private receiveIndex=0;
@@ -273,6 +278,7 @@ export class TransferConnection {
       if(chunk.byteLength>CHUNK_SIZE || r.bytes+chunk.byteLength>r.info.size)throw new Error("Tamanho de arquivo inválido.");
       if(r.sink)await r.sink.write(chunk);else r.chunks.push(chunk);
       if(this.receiving!==r)return;
+      r.hash.update(new Uint8Array(chunk));
       r.bytes+=chunk.byteLength;
       this.progress(r.info.name,r.bytes,r.info.size,"receive");
       if(this.incomingFlow && (r.bytes%FLOW_WINDOW===0 || r.bytes===r.info.size))this.control({type:"flow",id:r.info.id,bytes:r.bytes});
@@ -284,17 +290,17 @@ export class TransferConnection {
       case "offer": {
         if(!validateOffer(msg.offer)){this.control({type:"reject",reason:"Lote inválido ou maior que 100 GB."});return;}
         if(this.completedOffer?.id===msg.offer.id && JSON.stringify(this.completedOffer)===JSON.stringify(msg.offer)){
-          this.control({type:"accept",flowControl:1,resume:1,index:msg.offer.files.length,offset:0});return;
+          this.control({type:"accept",flowControl:1,resume:1,integrity:this.incomingIntegrity?"sha256":undefined,index:msg.offer.files.length,offset:0});return;
         }
         if(this.incoming?.id===msg.offer.id && JSON.stringify(this.incoming)===JSON.stringify(msg.offer)){
           if(this.accepted)this.sendAcceptance();else this.hooks.offer(this.incoming);
           return;
         }
         if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
-        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
+        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
         this.hooks.offer(this.incoming);return;
       }
-      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
+      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
         const info=this.incoming?.files[this.receiveIndex];
@@ -305,17 +311,19 @@ export class TransferConnection {
         const epoch=this.transferEpoch;
         const sink=this.sinkFactory?await this.sinkFactory(info,this.receiveIndex):null;
         if(this.stopped || epoch!==this.transferEpoch){await sink?.abort().catch(()=>{});return;}
-        this.receiving={info,chunks:[],bytes:0,sink};this.progress(info.name,0,info.size,"receive");return;
+        this.receiving={info,chunks:[],bytes:0,sink,hash:newSha256()};this.progress(info.name,0,info.size,"receive");return;
       }
       case "file-end": {
         const r=this.receiving;
         if(!r || msg.id!==r.info.id || r.bytes!==r.info.size)throw new Error("Arquivo incompleto. Envie novamente.");
+        if(this.incomingIntegrity && (typeof msg.sha256!=="string" || !/^[a-f0-9]{64}$/.test(msg.sha256) || digestHex(r.hash)!==msg.sha256))
+          throw new Error("A verificação de integridade falhou. O arquivo não foi concluído; envie-o novamente.");
         if(r.sink)await r.sink.close();
         if(this.receiving!==r)return;
-        this.hooks.file(r.info,r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}));
-        this.receiving=null;this.receiveIndex++;this.control({type:"ack",id:msg.id});return;
+        this.hooks.file({...r.info,integrity:this.incomingIntegrity?"verified":"unavailable"},r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}));
+        this.receiving=null;this.receiveIndex++;this.control({type:"ack",id:msg.id,integrity:this.incomingIntegrity?"sha256":undefined});return;
       }
-      case "ack": this.resolve(`ack:${msg.id}`);return;
+      case "ack": this.resolve(`ack:${msg.id}`,msg.integrity==="sha256");return;
       case "flow": if(typeof msg.id==="string" && Number.isSafeInteger(msg.bytes))this.resolve(`flow:${msg.id}:${msg.bytes}`);return;
       case "done-ack": if(this.outgoingOffer?.id===msg.id)this.resolve("done");return;
       case "done-confirm": if(this.completedOffer?.id===msg.id)this.completed=true;return;
@@ -346,7 +354,7 @@ export class TransferConnection {
     this.sinkFactory=sinkFactory||null;
     this.accepted=true;this.hooks.offer(null);this.sendAcceptance();
   }
-  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
+  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
@@ -381,7 +389,7 @@ export class TransferConnection {
     } catch(e) {
       if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
-    } finally {this.outgoing=false;this.outgoingOffer=null;}
+    } finally {this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;}
   }
   private async waitForChannel(){
     while(true){
@@ -398,28 +406,36 @@ export class TransferConnection {
       await this.waitForChannel();
       const generation=this.transportGeneration;
       const accept=this.wait<ResumePoint>("accept",600000);
-      this.control({type:"offer",offer,flowControl:1,resume:1});
+      this.control({type:"offer",offer,flowControl:1,resume:1,integrity:"sha256"});
       const point=await accept;
       this.checkTransport(generation);
       if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
+      for(const info of offer.files.slice(0,point.index))this.hooks.integrity?.(info.id,this.peerIntegrity);
       for(let i=point.index;i<files.length;i++) {
         this.sendIndex=i;
         const file=files[i],info=offer.files[i];
         this.checkTransport(generation);
         const start=i===point.index?point.offset:0;
+        if(this.sendingHash?.index!==i)this.sendingHash={index:i,hash:new SendingIntegrity()};
+        const hash=this.sendingHash.hash;
+        if(this.peerIntegrity)await hash.seek(file,start,async()=>this.checkTransport(generation));
         this.control({type:"file",id:info.id,offset:start});
         this.progress(file.name,start,file.size,"send");
         for(let offset=start;offset<file.size;offset+=CHUNK_SIZE) {
           const chunk=await file.slice(offset,offset+CHUNK_SIZE).arrayBuffer();
           await this.drain();
           this.checkTransport(generation);
+          if(this.peerIntegrity)hash.update(chunk);
           const current=Math.min(offset+chunk.byteLength,file.size);
           const confirmation=this.peerFlow && (current%FLOW_WINDOW===0 || current===file.size)?this.wait(`flow:${info.id}:${current}`,120000):null;
           this.channel!.send(chunk);
           if(confirmation)await confirmation;
           this.progress(file.name,current,file.size,"send");
         }
-        const ack=this.wait(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id});await ack;
+        const ack=this.wait<boolean>(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id,sha256:this.peerIntegrity?hash.digest():undefined});
+        const verified=await ack;
+        if(this.peerIntegrity&&!verified)throw new Error("O outro aparelho não confirmou a integridade do arquivo. Atualize as duas páginas e tente novamente.");
+        this.hooks.integrity?.(info.id,this.peerIntegrity&&verified);
       }
       this.checkTransport(generation);
       const done=this.peerResume?this.wait("done",60000):null;
