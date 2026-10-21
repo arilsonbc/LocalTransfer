@@ -13,7 +13,9 @@ function source(file, replacements={}) {
 const serviceUrl=source('lib/room-service.ts');
 const service=await import(serviceUrl);
 const progressUrl=source('lib/progress.ts');
-const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl});
+const integrityUrl=source('lib/integrity.ts',{'@noble/hashes/sha2.js':import.meta.resolve('@noble/hashes/sha2.js')});
+const integrity=await import(integrityUrl);
+const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl});
 const transfer=await import(transferUrl);
 const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
 const invite=await import(source('lib/invite.ts'));
@@ -365,6 +367,28 @@ test('perda da confirmação final reconecta sem entregar arquivos duplicados',a
     assert.equal(await p.blobs[0].blob.text(),'conteúdo');
   } finally {p.left.close();p.right.close();}
 });
+test('SHA-256 incremental preserva digest ao voltar e avançar em checkpoints',async()=>{
+  const bytes=Buffer.alloc(8*transfer.FLOW_WINDOW+37);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
+  const file=new Blob([bytes]);const hash=new integrity.SendingIntegrity();
+  for(let i=0;i<7*transfer.FLOW_WINDOW;i+=transfer.CHUNK_SIZE)hash.update(bytes.subarray(i,i+transfer.CHUNK_SIZE).buffer.slice(bytes.byteOffset+i,bytes.byteOffset+i+transfer.CHUNK_SIZE));
+  assert.ok(hash.checkpoints.size<=6);
+  const offset=6*transfer.FLOW_WINDOW+32768;let reads=0;
+  await hash.seek(file,offset,async()=>{reads++;});assert.ok(reads<10,'resume should not rehash the entire prefix');
+  for(let i=offset;i<bytes.length;i+=transfer.CHUNK_SIZE)hash.update(await file.slice(i,i+transfer.CHUNK_SIZE).arrayBuffer());
+  assert.equal(hash.digest(),createHash('sha256').update(bytes).digest('hex'));
+  await hash.seek(file,0,async()=>{});assert.equal(hash.digest(),createHash('sha256').digest('hex'));
+});
+test('arquivo alterado no transporte falha antes de concluir ou salvar',async()=>{
+  let aborted=false,closed=false;
+  const p=pair(true,async()=>({async write(){},async close(){closed=true;},async abort(){aborted=true;}}));
+  const send=p.left.channel.send.bind(p.left.channel);let corrupted=false;
+  p.left.channel.send=value=>{if(value instanceof ArrayBuffer&&!corrupted){corrupted=true;value=value.slice(0);new Uint8Array(value)[0]^=1;}send(value);};
+  try{
+    await assert.rejects(()=>p.left.send([new File(['bytes originais'],'foto.jpg')]),/cancelada/);
+    assert.ok(corrupted);assert.ok(aborted);assert.equal(closed,false);assert.equal(p.blobs.length,0);
+    assert.ok(p.errors.some(e=>e.includes('integridade')));
+  }finally{p.left.close();p.right.close();}
+});
 test('transferência em blocos preserva bytes, arquivos vazios e confirmação',async()=>{
   const p=pair();const bytes=new Uint8Array(1024*1024+37);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
   const files=[new File([bytes],'foto-teste.bin',{type:'application/octet-stream'}),new File([],'vazio.txt')];
@@ -373,6 +397,7 @@ test('transferência em blocos preserva bytes, arquivos vazios e confirmação',
   assert.equal(p.blobs.length,2);
   assert.deepEqual(new Uint8Array(await p.blobs[0].blob.arrayBuffer()),bytes);
   assert.equal(p.blobs[1].blob.size,0);
+  assert.ok(p.blobs.every(file=>file.info.integrity==='verified'));
   assert.equal(p.errors.length,0);
   assert.ok(p.completions.some(c=>c.direction==='send'&&c.count===2));
   assert.ok(p.completions.some(c=>c.direction==='receive'&&c.count===2));
