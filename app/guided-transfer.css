@@ -66,4 +66,7 @@
 .invite-notice p{font-size:11px;margin-top:12px;color:var(--muted)}
 .invite-notice input{width:100%;padding:10px;border:1px solid var(--line);background:var(--bg);border-radius:8px;color:var(--ink);font-size:11px;margin-top:8px}
 .progress-card>.transfer-stats{display:flex;flex-wrap:wrap;justify-content:space-between;gap:7px 16px;margin-top:15px;color:var(--muted);font-size:11px;line-height:1.8}
+.progress-card>.awake-note{display:block;font-size:10px;line-height:1.9;margin-top:12px;color:var(--muted)}
+.connection-options{margin-top:16px;border-top:1px solid var(--line);padding-top:13px;color:var(--muted);font-size:11px;line-height:1.8}
+.connection-options summary{cursor:pointer}.connection-options p{margin:10px 0}.connection-options .secondary{margin-top:6px}
 @media(max-width:650px){.nav-header>.brand{order:1}.nav-header>.theme-switch{order:2;margin-left:auto}.nav-header>.topnav{order:3;width:100%;margin-left:0;gap:5px}.topnav .nav-item{flex:1}.nav-header{gap:12px}.theme-button{width:34px;height:34px}}

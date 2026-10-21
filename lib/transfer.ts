@@ -99,6 +99,7 @@ export class TransferConnection {
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
+  get reconnecting(){return this.recovering || (!this.completed && ["failed","disconnected"].includes(this.pc?.connectionState));}
   get diagnostics():ConnectionDiagnostics {
     return this.failureDiagnostics||{version:"recovery-v3",mode:this.relayOnly?"relay":"auto",connection:this.pc?.connectionState||"new",ice:this.pc?.iceConnectionState||"new",gathering:this.pc?.iceGatheringState||"new",relayCandidates:(this.pc?.localDescription?.sdp.match(/ typ relay(?: |\r?$)/gm)||[]).length,serverErrors:[...this.serverErrors]};
   }
@@ -137,7 +138,7 @@ export class TransferConnection {
   retry(){
     if(this.stopped || this.completed || this.negotiating || this.retryTimer)return;
     if(this.completedOffer && !this.incoming && !this.outgoing)return;
-    if(this.retries>=3){this.fail("Não foi possível recuperar a conexão. Confira a internet nos dois aparelhos e crie outra sala.");return;}
+    if(this.retries>=5){this.fail("Não foi possível recuperar a conexão. Confira a internet nos dois aparelhos e crie outra sala.");return;}
     this.retries++;this.pauseTransport();
     this.retryTimer=setTimeout(()=>{
       this.retryTimer=null;
@@ -145,7 +146,7 @@ export class TransferConnection {
       if(this.session.role==="host")void this.hostOffer(true).catch(()=>this.retry());
       else if(this.revision)void api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify({type:"restart",revision:this.revision})},this.session.token).catch(()=>this.retry());
       void this.poll();
-    },Math.min(1000*this.retries,3000));
+    },[1000,5000,15000,30000,45000][this.retries-1]);
   }
   private async hostOffer(relay=this.relayOnly){
     if(this.negotiating || this.stopped)return;
@@ -192,7 +193,8 @@ export class TransferConnection {
         const description=JSON.parse(state.description);
         const revision=description.revision||0;
         if(this.session.role==="host" && description.type==="restart" && revision===this.revision){this.retry();return;}
-        if(this.session.role==="host" && (description.type!=="answer" || revision!==this.revision || this.pc.remoteDescription))return;
+        const matchingAnswer=revision===this.revision || (revision===0 && this.revision===1 && !this.recovering);
+        if(this.session.role==="host" && (description.type!=="answer" || !matchingAnswer || this.pc.remoteDescription))return;
         if(this.session.role==="guest" && (description.type!=="offer" || revision<this.revision || state.description===this.lastRemote))return;
         this.lastRemote=state.description;
         this.negotiating=true;negotiatingHere=true;
