@@ -46,6 +46,12 @@ A integração GitHub/Vercel publica novos commits da branch `main`. `vercel.jso
 
 ## Desenvolvimento
 
+### Integridade, pausa e miniaturas
+
+- As páginas negociam suporte a SHA-256 e verificam cada arquivo antes de concluir a gravação/entrega. O hash é incremental (`@noble/hashes`), sem carregar o arquivo inteiro. O remetente mantém no máximo seis checkpoints pequenos para recuperar o hash após reconexão; o receptor preserva o hash junto com os bytes confirmados. Erros de integridade abortam o arquivo atual. A confirmação indica igualdade dos bytes processados nos aparelhos, não autenticação da identidade do outro participante nem releitura física do disco. Versões antigas continuam compatíveis, sem selo de verificação.
+- Cada participante pode pausar. O envio só continua quando ambos liberarem suas próprias pausas; blocos já em trânsito ainda podem chegar. Prazos de confirmação e estimativas são suspensos/reiniciados durante a pausa. O estado da pausa é trocado novamente na reconexão. As páginas e as seleções precisam permanecer disponíveis; recarregar ou fechar ainda não é retomável. Pausar não amplia a validade da sala ou das credenciais TURN. A tela deixa de ser mantida ligada durante a pausa.
+- Miniaturas locais de 160 × 160 px são geradas sob demanda para JPEG, PNG, WebP e AVIF de até 12 MiB, quando `createImageBitmap` estiver disponível. A seleção e a lista recebida usam as miniaturas; nada é enviado antes do aceite para mostrar uma prévia. Arquivos em disco são abertos para prévia somente depois de fechar a gravação verificada. Imagens sem suporte, HEIC, SVG e arquivos maiores mantêm ícone; falhas de prévia não invalidam a transferência. URLs locais são liberadas quando os itens saem da tela/lista.
+
 ### Controle de consumo do TURN
 
 Configure `CLOUDFLARE_ACCOUNT_ID` e `CLOUDFLARE_ANALYTICS_API_TOKEN` como variáveis de servidor na Vercel. O token precisa somente de **Account Analytics: Read** na conta desejada. Não use o segredo do TURN como token de Analytics. Faça um novo deploy após alterar variáveis.
