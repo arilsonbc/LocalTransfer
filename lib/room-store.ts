@@ -9,7 +9,9 @@ export interface RoomStore {
   join(code: string, tokenHash: string, name: string): Promise<Room | null>;
   signal(code: string, role: "host" | "guest", tokenHash: string, description: string): Promise<boolean>;
   remove(code: string, tokenHash: string): Promise<boolean>;
-  allow(key: string, maximum: number): Promise<boolean>;
+  allow(key: string, maximum: number, ttlSeconds?:number): Promise<boolean>;
+  cached?(key:string):Promise<string|null>;
+  cache?(key:string,value:string,ttlSeconds:number):Promise<void>;
 }
 
 // Lua makes claims/updates atomic across separate Vercel Function instances.
@@ -36,7 +38,7 @@ local room=cjson.decode(raw)
 if room.host_token~=ARGV[1] and room.guest_token~=ARGV[1] then return 0 end
 return redis.call('DEL',KEYS[1])`;
 export const LIMIT_SCRIPT = `
-local count=redis.call('INCR',KEYS[1]);if count==1 then redis.call('EXPIRE',KEYS[1],120) end
+local count=redis.call('INCR',KEYS[1]);if count==1 then redis.call('EXPIRE',KEYS[1],tonumber(ARGV[1])) end
 return count`;
 
 export class RedisRoomStore implements RoomStore {
@@ -76,8 +78,12 @@ export class RedisRoomStore implements RoomStore {
   async remove(code: string, tokenHash: string) {
     return await this.command("EVAL", DELETE_SCRIPT, 1, this.key(code), tokenHash) === 1;
   }
-  async allow(key: string, maximum: number) {
-    return await this.command<number>("EVAL", LIMIT_SCRIPT, 1, `localtransfer:limit:${key}`) <= maximum;
+  async allow(key: string, maximum: number,ttlSeconds=120) {
+    return await this.command<number>("EVAL", LIMIT_SCRIPT, 1, `localtransfer:limit:${key}`,ttlSeconds) <= maximum;
+  }
+  async cached(key:string) {return this.command<string|null>("GET",`localtransfer:cache:${key}`);}
+  async cache(key:string,value:string,ttlSeconds:number) {
+    await this.command("SET",`localtransfer:cache:${key}`,value,"EX",ttlSeconds);
   }
 }
 
