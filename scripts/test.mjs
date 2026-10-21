@@ -12,11 +12,12 @@ function source(file, replacements={}) {
 }
 const serviceUrl=source('lib/room-service.ts');
 const service=await import(serviceUrl);
-const transferUrl=source('lib/transfer.ts');
+const progressUrl=source('lib/progress.ts');
+const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl});
 const transfer=await import(transferUrl);
 const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
 const invite=await import(source('lib/invite.ts'));
-const progress=await import(source('lib/progress.ts'));
+const progress=await import(progressUrl);
 const records=new Map(),counts=new Map();
 const db={
   async create(row){if(records.has(row.code))return false;records.set(row.code,structuredClone(row));return true;},

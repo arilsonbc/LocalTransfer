@@ -7,10 +7,11 @@ import {canSaveToDisk,chooseReceiveFolder} from "../lib/disk-receiver";
 import TopBar from "./top-bar";
 import InviteCard from "./invite-card";
 import {readInvite} from "../lib/invite";
+import {formatRemaining,type TransferStats} from "../lib/progress";
 
 type Mode = "choose" | "send" | "receive";
 type Received = FileInfo & { url: string|null };
-type Progress = { name: string; current: number; total: number; direction: string };
+type Progress = { name: string; current: number; total: number; direction: string;stats?:TransferStats };
 const size = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1_000_000_000 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1_000_000_000).toFixed(1)} GB`;
 const prettyCode = (code: string) => `${code.slice(0, 4)} ${code.slice(4)}`;
 
@@ -98,7 +99,7 @@ export default function GuidedTransfer() {
         }
         setOffer(incoming);
       },
-      progress: (fileName, current, fileTotal, direction) => { if (active()) setProgress({ name: fileName, current, total: fileTotal, direction }); },
+      progress: (fileName, current, fileTotal, direction,stats) => { if (active()) setProgress({ name: fileName, current, total: fileTotal, direction,stats }); },
       file: (info, blob) => {
         if (!active()) return;
         const url = blob?URL.createObjectURL(blob):null;
@@ -234,7 +235,7 @@ export default function GuidedTransfer() {
 
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
-        {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div><progress max={progress?.total || 1} value={progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Envio cancelado. Você pode tentar novamente."); }}>Cancelar transferência</button></section>}
+        {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div>{progress?.stats && <div className="transfer-stats"><span>{progress.stats.percent.toFixed(0)}% do lote · Arquivo {progress.stats.fileNumber} de {progress.stats.fileCount}</span><span>{progress.stats.bytesPerSecond>0 ? `${size(progress.stats.bytesPerSecond)}/s` : "Medindo velocidade…"}</span><span>{formatRemaining(progress.stats.secondsRemaining)}</span></div>}<progress max={progress?.stats?.total || progress?.total || 1} value={progress?.stats?.bytes || progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Envio cancelado. Você pode tentar novamente."); }}>Cancelar transferência</button></section>}
       </section>}
 
       {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">{received.some(file=>file.url) ? "Salve os arquivos antes de fechar esta página." : "Os arquivos já foram gravados na pasta escolhida."}</p>{received.map(file => <div className="download-row" key={file.id}><span className="file-icon"><FileIcon size={20} /></span><div><strong>{file.name}</strong><small>{size(file.size)}</small></div>{file.url ? <a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a> : <span className="secondary"><Check size={16} />Salvo na pasta</span>}</div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}

@@ -1,3 +1,4 @@
+import {ProgressMeter,type TransferStats} from "./progress";
 export const MAX_BATCH = 100_000_000_000;
 export const MAX_MEMORY = 200 * 1024 * 1024;
 export const MAX_FILES = 500;
@@ -13,7 +14,7 @@ type Hooks = {
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
-  progress:(name:string,current:number,total:number,direction:"send"|"receive")=>void;
+  progress:(name:string,current:number,total:number,direction:"send"|"receive",stats?:TransferStats)=>void;
   file:(file:FileInfo,blob:Blob|null)=>void;
   complete:(direction:"send"|"receive",count:number)=>void;
   error:(message:string)=>void;
@@ -55,6 +56,9 @@ export class TransferConnection {
   private requiresRelay=false;
   private serverErrors:number[]=[];
   private failureDiagnostics:ConnectionDiagnostics|null=null;
+  private meter=new ProgressMeter();
+  private outgoingOffer:Offer|null=null;
+  private sendIndex=0;
   constructor(private session:Session,private hooks:Hooks,private relayOnly=false) {}
   private createPeer(iceServers:RTCIceServer[]) {
     this.requiresRelay=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
@@ -74,7 +78,14 @@ export class TransferConnection {
   }
   private progress(name:string,current:number,total:number,direction:"send"|"receive") {
     const now=Date.now();
-    if(current===0 || current===total || now-this.lastProgressAt>=100){this.lastProgressAt=now;this.hooks.progress(name,current,total,direction);}
+    if(current===0 || current===total || now-this.lastProgressAt>=100){
+      this.lastProgressAt=now;
+      const batch=direction==="receive"?this.incoming:this.outgoingOffer;
+      const index=direction==="receive"?this.receiveIndex:this.sendIndex;
+      const batchTotal=batch?.files.reduce((n,file)=>n+file.size,0)||total;
+      const completed=batch?.files.slice(0,index).reduce((n,file)=>n+file.size,0)||0;
+      this.hooks.progress(name,current,total,direction,this.meter.sample(completed+current,batchTotal,index+1,batch?.files.length||1));
+    }
   }
   async start() {
     try {
@@ -182,7 +193,7 @@ export class TransferConnection {
     switch(msg.type) {
       case "offer": {
         if(!validateOffer(msg.offer) || this.busy) {this.control({type:"reject",reason:this.busy?"O aparelho está ocupado.":"Lote inválido ou maior que 100 GB."});return;}
-        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.accepted=false;this.receiveIndex=0;
+        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.accepted=false;this.receiveIndex=0;this.meter.reset();
         this.hooks.offer(this.incoming);return;
       }
       case "accept": this.peerFlow=msg.flowControl===1;this.resolve("accept");return;
@@ -241,11 +252,12 @@ export class TransferConnection {
     if(this.busy)throw new Error("Aguarde a transferência atual terminar.");
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
-    this.outgoing=true;this.cancelled=false;this.peerFlow=false;
+    this.outgoing=true;this.cancelled=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
     try {
       const accept=this.wait("accept",600000);this.control({type:"offer",offer,flowControl:1});
       await accept;
       for(let i=0;i<files.length;i++) {
+        this.sendIndex=i;
         const file=files[i],info=offer.files[i];
         if(this.cancelled)throw new Error("Transferência cancelada.");
         this.control({type:"file",id:info.id});
@@ -265,7 +277,7 @@ export class TransferConnection {
     } catch(e) {
       if(!this.stopped && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
-    } finally {this.outgoing=false;}
+    } finally {this.outgoing=false;this.outgoingOffer=null;}
   }
   private resetTransfer() {
     this.transferEpoch++;
