@@ -17,7 +17,9 @@ const integrityUrl=source('lib/integrity.ts',{'@noble/hashes/sha2.js':import.met
 const integrity=await import(integrityUrl);
 const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl});
 const transfer=await import(transferUrl);
-const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl}));
+const photoUrl=source('lib/photo-preview.ts');
+const photo=await import(photoUrl);
+const disk=await import(source('lib/disk-receiver.ts',{'./transfer':transferUrl,'./photo-preview':photoUrl}));
 const invite=await import(source('lib/invite.ts'));
 const progress=await import(progressUrl);
 const records=new Map(),counts=new Map();
@@ -416,6 +418,23 @@ test('arquivo alterado no transporte falha antes de concluir ou salvar',async()=
     assert.ok(corrupted);assert.ok(aborted);assert.equal(closed,false);assert.equal(p.blobs.length,0);
     assert.ok(p.errors.some(e=>e.includes('integridade')));
   }finally{p.left.close();p.right.close();}
+});
+test('aparelho antigo nao recebe selo de integridade nem controle de pausa falso',async()=>{
+  const p=pair();const send=p.left.channel.send.bind(p.left.channel);
+  p.left.channel.send=value=>{if(typeof value==='string'){const msg=JSON.parse(value);if(msg.type==='offer'){delete msg.integrity;delete msg.pause;value=JSON.stringify(msg);}}send(value);};
+  try{
+    await p.left.send([new File(['compatível'],'arquivo.txt')]);await new Promise(r=>setTimeout(r,10));
+    assert.equal(p.blobs[0].info.integrity,'unavailable');assert.equal(p.left.pauseSupported,false);assert.equal(p.right.pauseSupported,false);
+  }finally{p.left.close();p.right.close();}
+});
+test('falha da miniatura em disco nao invalida arquivo verificado',async()=>{
+  const p=pair(true,async()=>({async write(){},async close(){},async abort(){},async preview(){throw new Error('Formato sem prévia');}}));
+  try{await p.left.send([new File(['imagem'],'foto.jpg',{type:'image/jpeg'})]);assert.equal(p.blobs[0].info.integrity,'verified');assert.equal(p.errors.length,0);}finally{p.left.close();p.right.close();}
+});
+test('previas limitam formatos e tamanho e nao tentam renderizar SVG ou HEIC',()=>{
+  assert.equal(photo.canPreviewPhoto('image/jpeg',1024),true);assert.equal(photo.canPreviewPhoto('IMAGE/PNG',1024),true);
+  for(const type of ['image/svg+xml','image/heic','text/html','application/octet-stream'])assert.equal(photo.canPreviewPhoto(type,1024),false);
+  assert.equal(photo.canPreviewPhoto('image/png',photo.MAX_PHOTO_PREVIEW+1),false);assert.equal(photo.canPreviewPhoto('image/png',0),false);
 });
 test('transferência em blocos preserva bytes, arquivos vazios e confirmação',async()=>{
   const p=pair();const bytes=new Uint8Array(1024*1024+37);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
