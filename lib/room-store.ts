@@ -18,6 +18,8 @@ local raw=redis.call('GET',KEYS[1]); if not raw then return false end
 local room=cjson.decode(raw)
 if room.expires_at<=tonumber(ARGV[3]) or room.guest_token~=cjson.null then return false end
 room.guest_token=ARGV[1];room.guest_name=ARGV[2]
+-- Once claimed, only the same two token holders can reconnect for 48 hours.
+room.expires_at=tonumber(ARGV[3])+172800000
 redis.call('SET',KEYS[1],cjson.encode(room),'PX',room.expires_at-tonumber(ARGV[3]))
 return cjson.encode(room)`;
 export const SIGNAL_SCRIPT = `

@@ -26,8 +26,12 @@ export async function POST(request:Request,context:{params:Promise<{code:string}
     const data=await body(request);
     if(typeof data.description!=="string" || data.description.length>40000) return json({error:"Conexão inválida."},400);
     const desc=JSON.parse(data.description);
-    if(desc.type!==(auth.role==="host"?"offer":"answer")||typeof desc.sdp!=="string"||!desc.sdp.includes("m=application")||desc.sdp.includes("m=audio")||desc.sdp.includes("m=video")) return json({error:"Conexão inválida."},400);
-    const saved=await store.signal(auth.row.code,auth.role as "host"|"guest",auth.digest,JSON.stringify({type:desc.type,sdp:desc.sdp}));
+    const revision=desc.revision??0;
+    if(!Number.isSafeInteger(revision)||revision<0||revision>1000)return json({error:"Conexão inválida."},400);
+    const restart=desc.type==="restart" && auth.role==="guest" && revision>0;
+    if(!restart && (desc.type!==(auth.role==="host"?"offer":"answer")||typeof desc.sdp!=="string"||!desc.sdp.includes("m=application")||desc.sdp.includes("m=audio")||desc.sdp.includes("m=video"))) return json({error:"Conexão inválida."},400);
+    const description=restart?{type:"restart",revision}:{type:desc.type,sdp:desc.sdp,...(revision?{revision,relay:desc.relay===true}:{})};
+    const saved=await store.signal(auth.row.code,auth.role as "host"|"guest",auth.digest,JSON.stringify(description));
     if(!saved) return json({error:"Sala expirada."},401);
     return json({ok:true});
   } catch {return json({error:"Não foi possível conectar os aparelhos."},400);}

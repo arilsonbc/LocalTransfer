@@ -101,6 +101,19 @@ test('salas expiradas e origem externa são rejeitadas',async()=>{
   assert.equal((await join.POST(request('/','POST',{name:'celular'}),context(host.code))).status,404);
   assert.equal((await create.POST(request('/','POST',{name:'x'},undefined,'https://outro.test'))).status,403);
 });
+
+test('sinalização versionada preserva revisão e só o receptor pode pedir reconexão',async()=>{
+  const host=await newRoom();
+  const guest=await (await join.POST(request('/','POST',{name:'Receptor'}),context(host.code))).json();
+  const offer={type:'offer',sdp:'v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n',revision:2,relay:true};
+  assert.equal((await room.POST(request('/','POST',{description:JSON.stringify(offer)},host.token),context(host.code))).status,200);
+  const state=await (await room.GET(request('/','GET',undefined,guest.token),context(host.code))).json();
+  assert.deepEqual(JSON.parse(state.description),offer);
+  const restart={type:'restart',revision:2};
+  assert.equal((await room.POST(request('/','POST',{description:JSON.stringify(restart)},guest.token),context(host.code))).status,200);
+  assert.equal((await room.POST(request('/','POST',{description:JSON.stringify(restart)},host.token),context(host.code))).status,400);
+  assert.equal((await room.POST(request('/','POST',{description:JSON.stringify({...offer,revision:-1})},host.token),context(host.code))).status,400);
+});
 test('limite de tentativas é aplicado',async()=>{
   const req=new Request('https://localtransfer.test',{headers:{'x-forwarded-for':'test-fixed-ip'}});
   assert.equal(await service.allowed(db,req,'limited',2),true);
