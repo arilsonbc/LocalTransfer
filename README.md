@@ -46,6 +46,20 @@ A integração GitHub/Vercel publica novos commits da branch `main`. `vercel.jso
 
 ## Desenvolvimento
 
+### Controle de consumo do TURN
+
+Configure `CLOUDFLARE_ACCOUNT_ID` e `CLOUDFLARE_ANALYTICS_API_TOKEN` como variáveis de servidor na Vercel. O token precisa somente de **Account Analytics: Read** na conta desejada. Não use o segredo do TURN como token de Analytics. Faça um novo deploy após alterar variáveis.
+
+O servidor consulta o total de saída (`egressBytes`) e entrada (`ingressBytes`) de **todas as chaves TURN da conta** pela API GraphQL oficial, com cache compartilhado no Redis por até cinco minutos. A consulta ocorre ao preparar uma conexão; não há monitor agendado ou envio de e-mails. Os totais ficam no servidor; o navegador recebe somente a disponibilidade e avisos. Para acompanhar os números e investigar chaves/usuários, use Cloudflare → Realtime → TURN → Analytics.
+
+`TURN_MONTHLY_BUDGET_GB` define um orçamento operacional de saída em GB decimais por **mês calendário UTC**, padrão **900 GB**. Aos 80% (720 GB no padrão), novas conexões recebem aviso. Ao atingir o orçamento, novas credenciais deixam de ser emitidas e a conexão direta continua disponível. `TURN_ENABLED=false` também pausa a emissão. Se Analytics estiver parcialmente configurado ou falhar, novas conexões usam somente STUN, sem emitir credenciais TURN; credenciais existentes continuam válidas. Sem ambas as variáveis, a medição fica desativada para compatibilidade com instalações antigas; os limites de emissão continuam ativos.
+
+Proteções no servidor: sala e token válidos, até três solicitações por minuto por IP/participante, dez por minuto por IP entre todas as salas, 60 por hora por IP, seis emissões por participante da sala em 48 horas e 600 emissões por hora no projeto. São contadores atômicos no Redis. Recriar salas não remove os limites por IP/global. Reconexões dentro da mesma página reutilizam as credenciais e não consomem novas emissões.
+
+**Não é um teto financeiro garantido.** Analytics pode atrasar, o cache tem cinco minutos e credenciais já emitidas duram até 48 horas. Sessões existentes não são revogadas ao atingir o orçamento. O mês calendário pode diferir do período da fatura; consumo SFU e outras cobranças não entram neste contador. Um cliente modificado pode reutilizar credenciais válidas. Para incidentes, acompanhe a conta e revogue credenciais/chaves pelo painel Cloudflare, considerando o impacto nas transferências em andamento. Limites por IP podem afetar aparelhos que compartilham o mesmo IP de operadora.
+
+Referência: [Analytics do TURN](https://developers.cloudflare.com/realtime/turn/analytics/).
+
 Requer Node.js >= 22.13.0 e npm. Use Node 24 para o mesmo ambiente do CI.
 
 ```sh
