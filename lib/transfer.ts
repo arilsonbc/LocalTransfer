@@ -12,6 +12,7 @@ type ResumePoint={index:number;offset:number};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
+  notice?:(message:string)=>void;
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
@@ -117,7 +118,10 @@ export class TransferConnection {
   async start() {
     try {
       this.hooks.state("connecting","Preparando conexão segura…");
-      const config=await api<{iceServers:RTCIceServer[]}>(`/api/rooms/${this.session.code}/ice`,"POST",{},this.session.token);
+      const config=await api<{iceServers:RTCIceServer[];turn?:{status:string;notice:string}}>(`/api/rooms/${this.session.code}/ice`,"POST",{},this.session.token);
+      this.hooks.notice?.(config.turn?.notice||"");
+      if(this.relayOnly&&!config.iceServers.some(s=>(Array.isArray(s.urls)?s.urls:[s.urls]).some(u=>/^turns?:/.test(u))))
+        throw new Error(config.turn?.notice||"A retransmissão está indisponível. Tente uma conexão direta na mesma rede Wi-Fi.");
       if(this.stopped) return;
       this.iceServers=config.iceServers;
       if(this.session.role==="host") {

@@ -31,6 +31,7 @@ export default function GuidedTransfer() {
   const [received, setReceived] = useState<Received[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState("");
+  const [turnNotice,setTurnNotice]=useState("");
   const [copied, setCopied] = useState(false);
   const [complete, setComplete] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -97,6 +98,7 @@ export default function GuidedTransfer() {
     sessionRef.current = s; setSession(s); setPeer(s.peerName || ""); setState("connecting");setDiagnostics(null);setDiagnosticCopied(false);
     const active = () => epoch.current === currentEpoch;
     const conn = new TransferConnection(s, {
+      notice: message=>{if(active())setTurnNotice(message);},
       state: (next, message) => { if (active()) { setState(next); setStatus(message); } },
       peer: value => { if (active()) setPeer(value); },
       offer: incoming => {
@@ -170,7 +172,7 @@ export default function GuidedTransfer() {
     epoch.current++; connection.current?.close(); connection.current = null;
     const old = sessionRef.current; sessionRef.current = null;
     if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
-    setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);
+    setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
     setOffer(null); setProgress(null); setComplete(false); setError("");setDiagnostics(null);setDiagnosticCopied(false); autoStarted.current = false;
   }
 
@@ -242,6 +244,7 @@ export default function GuidedTransfer() {
           {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>{destination ? <>Arquivos salvos na pasta <strong>{destination}</strong>.</> : <>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</>}</p></div>}
         </>}
 
+        {turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
         {(sending || progress) && <section className="progress-card" aria-live="polite"><div><span className="progress-icon">{progress?.direction === "receive" ? <ArrowDownToLine size={23} /> : <UploadCloud size={23} />}</span><div><strong>{progress?.name || "Aguardando aceitar no outro aparelho…"}</strong><small>{progress ? `${progress.direction === "receive" ? "Recebendo" : "Enviando"} · ${size(progress.current)} de ${size(progress.total)}` : "Nenhum arquivo é enviado antes da confirmação."}</small></div></div>{progress?.stats && <div className="transfer-stats"><span>{progress.stats.percent.toFixed(0)}% do lote · Arquivo {progress.stats.fileNumber} de {progress.stats.fileCount}</span><span>{state==="reconnecting" ? "Reconectando…" : progress.stats.bytesPerSecond>0 ? `${size(progress.stats.bytesPerSecond)}/s` : "Medindo velocidade…"}</span><span>{state==="reconnecting" ? "Os dados recebidos estão preservados" : formatRemaining(progress.stats.secondsRemaining)}</span></div>}<progress max={progress?.stats?.total || progress?.total || 1} value={progress?.stats?.bytes || progress?.current || 0} /><button className="text-button" onClick={() => { connection.current?.cancel(); setSending(false); setProgress(null); setError("Transferência cancelada. Você pode tentar novamente."); }}>Cancelar transferência</button><small className="awake-note">{awake ? "Tela mantida ligada durante a transferência." : "Mantenha a tela ligada e esta página aberta."} A retomada funciona enquanto as duas páginas permanecerem abertas.</small><details className="connection-options"><summary>Problemas com a conexão?</summary><p>Uma nova tentativa preserva o que já foi recebido. Não feche as páginas nem remova os arquivos selecionados.</p><button className="secondary" disabled={state==="reconnecting"} onClick={()=>connection.current?.retry()}>Reconectar agora</button></details></section>}
