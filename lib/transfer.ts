@@ -174,7 +174,7 @@ export class TransferConnection {
       if(this.relayOnly&&!config.iceServers.some(s=>(Array.isArray(s.urls)?s.urls:[s.urls]).some(u=>/^turns?:/.test(u))))
         throw new Error(config.turn?.notice||"A retransmissão está indisponível. Tente uma conexão direta na mesma rede Wi-Fi.");
       if(this.stopped) return;
-      if(typeof RTCPeerConnection.generateCertificate==="function")this.certificate=await RTCPeerConnection.generateCertificate({name:"ECDSA",namedCurve:"P-256"});
+      if(typeof RTCPeerConnection.generateCertificate==="function")this.certificate=await RTCPeerConnection.generateCertificate({name:"ECDSA",namedCurve:"P-256"} as EcKeyGenParams);
       this.identityEnabled=true;
       if(this.stopped)return;
       this.iceServers=config.iceServers;
@@ -533,6 +533,7 @@ export class TransferConnection {
   private fail(message:string) {if(this.stopped)return;this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
   close() {
     this.stopped=true;
+    this.peerWords=null;this.hooks.verification?.(null);
     if(this.retryTimer)clearTimeout(this.retryTimer);
     if(this.disconnectTimer)clearTimeout(this.disconnectTimer);
     if(this.pollTimer)clearTimeout(this.pollTimer);
