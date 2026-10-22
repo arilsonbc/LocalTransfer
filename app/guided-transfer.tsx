@@ -10,6 +10,7 @@ import {readInvite} from "../lib/invite";
 import {type TransferStats} from "../lib/progress";
 import TransferProgress,{type PauseState} from "./transfer-progress";
 import FileThumbnail from "./file-thumbnail";
+import ReceiveOffer from "./receive-offer";
 import {useKeepAwake} from "./use-keep-awake";
 
 type Mode = "choose" | "send" | "receive";
@@ -30,6 +31,9 @@ export default function GuidedTransfer() {
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [offer, setOffer] = useState<Offer | null>(null);
+  const [selectedIds,setSelectedIds]=useState<string[]>([]);
+  const offeredId=useRef<string|null>(null);
+  const [acceptedCount,setAcceptedCount]=useState(0);
   const [received, setReceived] = useState<Received[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState("");
@@ -103,6 +107,7 @@ export default function GuidedTransfer() {
     const active = () => epoch.current === currentEpoch;
     setVerified({});setPause({local:false,remote:false,supported:false});
     const conn = new TransferConnection(s, {
+      selection:count=>{if(active())setAcceptedCount(count);},
       pause:(local,remote,supported)=>{if(active())setPause({local,remote,supported});},
       integrity:(id,value)=>{if(active())setVerified(old=>({...old,[id]:value}));},
       notice: message=>{if(active())setTurnNotice(message);},
@@ -110,11 +115,8 @@ export default function GuidedTransfer() {
       peer: value => { if (active()) setPeer(value); },
       offer: incoming => {
         if (!active()) return;
-        const incomingSize=incoming?.files.reduce((n,f)=>n+f.size,0)||0;
-        if (incoming && incomingSize<=MAX_MEMORY && retainedBytes.current + incomingSize > MAX_MEMORY) {
-          queueMicrotask(() => connection.current?.reject());
-          setError("Salve os arquivos que já chegaram e toque em Limpar lista antes de receber mais."); return;
-        }
+        if(incoming&&offeredId.current!==incoming.id){setSelectedIds(incoming.files.map(f=>f.id));setError("");}
+        offeredId.current=incoming?.id||null;
         setOffer(incoming);
       },
       progress: (fileName, current, fileTotal, direction,stats) => { if (active()) setProgress({ name: fileName, current, total: fileTotal, direction,stats }); },
@@ -126,7 +128,7 @@ export default function GuidedTransfer() {
       },
       complete: (direction, count) => {
         if (!active()) return;
-        setComplete(true); setProgress(null); setSending(false); remember(direction, count);
+        setAcceptedCount(count);setComplete(true); setProgress(null); setSending(false); remember(direction, count);
       },
       error: message => { if (active()) { setError(message); setSending(false); setProgress(null);setDiagnostics(connection.current?.diagnostics||null); } },
     },new URLSearchParams(location.search).get("relay")==="1");
@@ -179,7 +181,7 @@ export default function GuidedTransfer() {
     epoch.current++; connection.current?.close(); connection.current = null;
     const old = sessionRef.current; sessionRef.current = null;
     if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
-    setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
+    setSelectedIds([]);offeredId.current=null;setAcceptedCount(0);setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
     setOffer(null); setProgress(null); setComplete(false); setError("");setPause({local:false,remote:false,supported:false});setVerified({});setDiagnostics(null);setDiagnosticCopied(false); autoStarted.current = false;
   }
 
@@ -196,12 +198,18 @@ export default function GuidedTransfer() {
     const conn=connection.current;
     if(!conn || !offer || choosingFolder)return;
     const currentEpoch=epoch.current;
-    if(offer.files.reduce((n,file)=>n+file.size,0)<=MAX_MEMORY){setDestination("");conn.accept();return;}
+    const selected=offer.files.filter(f=>selectedIds.includes(f.id));
+    if(!selected.length){setError("Escolha pelo menos um arquivo para receber.");return;}
+    const total=selected.reduce((n,file)=>n+file.size,0);
+    if(total<=MAX_MEMORY){
+      if(retainedBytes.current+total>MAX_MEMORY){setError("Salve e limpe os arquivos que já chegaram, ou selecione menos arquivos para receber.");return;}
+      setDestination("");setError("");conn.accept(undefined,offer.id,selectedIds);return;
+    }
     setChoosingFolder(true);setError("");
     try {
       const folder=await chooseReceiveFolder();
       if(epoch.current!==currentEpoch || connection.current!==conn || !conn.busy)return;
-      setDestination(folder.name);conn.accept(folder.open,offer.id);
+      setDestination(folder.name);conn.accept(folder.open,offer.id,selectedIds);
     } catch(e) {
       if(epoch.current===currentEpoch && !(e instanceof DOMException && e.name==="AbortError"))setError("Não foi possível abrir a pasta. Escolha uma pasta em que você possa salvar arquivos e tente novamente.");
     } finally {setChoosingFolder(false);}
@@ -215,7 +223,6 @@ export default function GuidedTransfer() {
 
   const sendingStep = complete ? 3 : session ? 2 : 1;
   const receivingStep = complete ? 3 : session ? 2 : 1;
-  const largeOffer=!!offer && offer.files.reduce((n,file)=>n+file.size,0)>MAX_MEMORY;
 
   return <div className="guided-app">
     <TopBar onHome={() => { if (mode !== "choose") restart(); }} />
@@ -241,7 +248,7 @@ export default function GuidedTransfer() {
           <input ref={picker} className="sr-only" type="file" multiple aria-label="Escolher arquivos" onChange={e => { chooseFiles(e.target.files); e.target.value = ""; }} />
           {!files.length ? <section className={`flow-card choose-files ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFiles(e.dataTransfer.files); }}>
             <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 100 GB por vez · Para receber mais de 200 MB, use Chrome ou Edge no computador.</small>
-          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{files.length} arquivo(s) chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><p className="integrity-badge">{Object.values(verified).filter(Boolean).length===files.length?"Integridade SHA-256 confirmada em todos os arquivos.":"Verificação adicional indisponível. Atualize as duas páginas nos próximos envios."}</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
+          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{acceptedCount} de {files.length} arquivo(s) foram aceitos e chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><p className="integrity-badge">{Object.values(verified).filter(Boolean).length===acceptedCount?"Integridade SHA-256 confirmada em todos os arquivos.":"Verificação adicional indisponível. Atualize as duas páginas nos próximos envios."}</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
             {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{state==="reconnecting" ? "Recuperando a conexão…" : connected ? (sending ? (progress ? (pause.local||pause.remote?"Transferência pausada.":"Enviando seus arquivos…") : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p><div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button>{!connected && state!=="reconnecting" && <InviteCard code={session.code}/>}<div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "O envio começa após a confirmação no outro aparelho.") : state==="reconnecting" ? status : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
             <div className="batch-summary"><FileIcon size={19} /><span><strong>{files.length} arquivo(s) selecionado(s)</strong><small>{size(total)}</small></span>{!connected && !loading && <button className="text-button" onClick={() => picker.current?.click()}>Adicionar mais<Plus size={14} /></button>}</div>
             <details className="file-details"><summary>Ver arquivos selecionados</summary>{files.map((file, i) => <div className="file-line" key={`${file.name}-${i}`}><FileThumbnail file={file} name={file.name}/><span>{file.name}</span><small>{size(file.size)}</small></div>)}</details>
@@ -263,7 +270,7 @@ export default function GuidedTransfer() {
       <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
     </main>
     <footer className="site-footer"><span>LocalTransfer</span><span>Do seu aparelho para o outro.</span></footer>
-    {offer && <div className="modal-backdrop"><section className="receive-modal" role="dialog" aria-modal="true" aria-labelledby="receive-title"><span className="success-icon"><ArrowDownToLine size={30} /></span><span className="card-kicker">SEUS ARQUIVOS ESTÃO PRONTOS</span><h2 id="receive-title">Aceitar os arquivos<br />{" "}de {peer || "outro aparelho"}?</h2><p>{offer.files.length} arquivo(s) · {size(offer.files.reduce((n, file) => n + file.size, 0))}</p><div className="offer-files">{offer.files.map(file => <div key={file.id}><FileIcon size={16} /><span>{file.name}</span><small>{size(file.size)}</small></div>)}</div>{largeOffer && <p>{diskSupported ? "Escolha uma pasta com espaço livre. Os arquivos serão gravados nela durante o recebimento." : "Para receber mais de 200 MB, abra este site no Chrome ou Edge de um computador. Este navegador não permite salvar diretamente em uma pasta."}</p>}<button className="primary" autoFocus disabled={choosingFolder || (largeOffer && !diskSupported)} onClick={() => void acceptOffer()}>{choosingFolder ? <LoaderCircle className="spin" size={18} /> : <Check size={18} />}{choosingFolder ? "Abrindo pasta…" : largeOffer ? "Escolher pasta e receber" : "Aceitar arquivos"}</button><button className="text-button" disabled={choosingFolder} onClick={() => connection.current?.reject()}>Não receber agora</button></section></div>}
+    {offer && <ReceiveOffer offer={offer} selected={selectedIds} peer={peer} busy={choosingFolder} diskSupported={diskSupported} error={error} onChange={ids=>{setSelectedIds(ids);setError("");}} onAccept={()=>void acceptOffer()} onReject={()=>connection.current?.reject()}/>}
   </div>;
 }
 
