@@ -1,5 +1,6 @@
 import {ProgressMeter,type TransferStats} from "./progress";
 import {newSha256,digestHex,SendingIntegrity} from "./integrity";
+import {derivePeerVerification} from "./peer-verification";
 export const MAX_BATCH = 100_000_000_000;
 export const MAX_MEMORY = 200 * 1024 * 1024;
 export const MAX_FILES = 500;
@@ -13,6 +14,7 @@ type ResumePoint={index:number;offset:number;selected?:unknown};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
+  verification?:(words:string|null)=>void;
   pause?:(local:boolean,remote:boolean,supported:boolean)=>void;
   notice?:(message:string)=>void;
   integrity?:(id:string,verified:boolean)=>void;
@@ -43,6 +45,11 @@ type PendingWait={resolve:(value?:unknown)=>void;reject:(e:Error)=>void;timer:Re
 
 export class TransferConnection {
   private pc!:RTCPeerConnection;
+  private certificate:RTCCertificate|null=null;
+  private identityEnabled=false;
+  private peerBinding:string|null=null;
+  private peerWords:string|null=null;
+  get verificationPhrase(){return this.peerWords;}
   private channel:RTCDataChannel|null=null;
   private stopped=false;
   private pollTimer:ReturnType<typeof setTimeout>|null=null;
@@ -95,11 +102,12 @@ export class TransferConnection {
   private disconnectTimer:ReturnType<typeof setTimeout>|null=null;
   constructor(private session:Session,private hooks:Hooks,private relayOnly=false) {}
   private createPeer(iceServers:RTCIceServer[]) {
+    this.peerWords=null;this.hooks.verification?.(null);
     const generation=++this.transportGeneration;
     const oldChannel=this.channel;this.channel=null;
     oldChannel?.close();this.pc?.close();
     this.requiresRelay=iceServers.some(server=>(Array.isArray(server.urls)?server.urls:[server.urls]).some(url=>/^turns?:/.test(url)));
-    this.pc=new RTCPeerConnection({iceServers,...(this.relayOnly?{iceTransportPolicy:"relay" as const}:{})});
+    this.pc=new RTCPeerConnection({iceServers,...(this.certificate?{certificates:[this.certificate]}:{}),...(this.relayOnly?{iceTransportPolicy:"relay" as const}:{})});
     this.pc.onicecandidateerror=event=>{if(!this.serverErrors.includes(event.errorCode))this.serverErrors.push(event.errorCode);};
     this.pc.ondatachannel=e=>{if(generation===this.transportGeneration)this.bind(e.channel);};
     this.pc.onconnectionstatechange=()=>{
@@ -166,6 +174,9 @@ export class TransferConnection {
       if(this.relayOnly&&!config.iceServers.some(s=>(Array.isArray(s.urls)?s.urls:[s.urls]).some(u=>/^turns?:/.test(u))))
         throw new Error(config.turn?.notice||"A retransmissão está indisponível. Tente uma conexão direta na mesma rede Wi-Fi.");
       if(this.stopped) return;
+      if(typeof RTCPeerConnection.generateCertificate==="function")this.certificate=await RTCPeerConnection.generateCertificate({name:"ECDSA",namedCurve:"P-256"});
+      this.identityEnabled=true;
+      if(this.stopped)return;
       this.iceServers=config.iceServers;
       if(this.session.role==="host") {
         await this.hostOffer();
@@ -274,13 +285,19 @@ export class TransferConnection {
     channel.binaryType="arraybuffer";
     channel.bufferedAmountLowThreshold=65536;
     channel.onopen=()=>{
-      void this.queue.then(()=>{
+      this.queue=this.queue.then(async()=>{
         if(this.stopped || this.channel!==channel)return;
+        if(this.identityEnabled){
+          const proof=await derivePeerVerification(this.pc.localDescription?.sdp||"",this.pc.remoteDescription?.sdp||"",this.session.code);
+          if(this.stopped||this.channel!==channel)return;
+          if(this.peerBinding&&this.peerBinding!==proof.binding)throw new Error("A identificação dos aparelhos mudou durante a reconexão. Por segurança, crie outra sala e confira as palavras novamente.");
+          this.peerBinding=proof.binding;this.peerWords=proof.words;this.hooks.verification?.(proof.words);
+        }
         if(this.connectTimer)clearTimeout(this.connectTimer);this.connectTimer=null;
         if(this.retryTimer)clearTimeout(this.retryTimer);this.retryTimer=null;
         this.recovering=false;this.retries=0;this.resolve("ready");
         this.hooks.state("connected","Aparelhos conectados");
-      });
+      }).catch(error=>{if(!this.stopped&&this.channel===channel)this.fail(error instanceof Error?error.message:"Não foi possível conferir os aparelhos.");});
     };
     channel.onclose=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
     channel.onerror=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
@@ -390,8 +407,9 @@ export class TransferConnection {
       case "cancel": this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
     }
   }
-  accept(sinkFactory?:SinkFactory,offerId?:string,selectedIds?:string[]) {
+  accept(sinkFactory?:SinkFactory,offerId?:string,selectedIds?:string[],confirmed=false) {
     if(!this.incoming || this.accepted || (offerId && this.incoming.id!==offerId))return;
+    if(this.identityEnabled&&(!this.peerWords||!confirmed)){this.hooks.error("Confira as palavras nos dois aparelhos antes de aceitar.");return;}
     const ids=selectedIds??this.incoming.files.map(f=>f.id);
     if(!ids.length||new Set(ids).size!==ids.length||ids.some(id=>!this.incoming!.files.some(f=>f.id===id))){this.hooks.error("Escolha pelo menos um arquivo válido para receber.");return;}
     if(!this.incomingSelectable&&ids.length!==this.incoming.files.length){this.hooks.error("Atualize o site no aparelho que envia para escolher apenas alguns arquivos.");return;}
