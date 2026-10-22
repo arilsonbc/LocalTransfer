@@ -335,6 +335,51 @@ function reconnectTransport(p){
   },5);
 }
 async function until(predicate,timeout=2000){const start=Date.now();while(!predicate()){if(Date.now()-start>timeout)throw new Error('Condition timed out');await new Promise(r=>setTimeout(r,5));}}
+test('selecao parcial nao le arquivos recusados e preserva selecao hash e progresso apos queda',async()=>{
+  const p=pair();let dropped=false;const stats=[];
+  p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id,[offer.files[1].id,offer.files[3].id]));};
+  p.right.hooks.progress=(name,current,total,direction,stat)=>{stats.push(stat);if(current>=131072&&!dropped){dropped=true;setTimeout(()=>reconnectTransport(p),0);}};
+  const excluded=new File(['não enviar'],'recusado.txt');excluded.slice=()=>{throw new Error('Arquivo recusado foi lido');};
+  const data=Buffer.alloc(2*transfer.FLOW_WINDOW+37,123);
+  try{
+    await p.left.send([excluded,new File([data],'aceito.bin'),excluded,new File(['último'],'aceito.txt')]);await new Promise(r=>setTimeout(r,20));
+    assert.ok(dropped);assert.deepEqual(p.blobs.map(f=>f.info.name),['aceito.bin','aceito.txt']);assert.ok(p.blobs.every(f=>f.info.integrity==='verified'));
+    assert.deepEqual(Buffer.from(await p.blobs[0].blob.arrayBuffer()),data);assert.ok(stats.every(s=>s.fileCount===2&&s.total===data.length+Buffer.byteLength('último')));
+    assert.ok(p.completions.every(c=>c.count===2));
+  }finally{p.left.close();p.right.close();}
+});
+test('escolher um arquivo pequeno evita exigir pasta pelo tamanho do lote original',async()=>{
+  const p=pair();
+  p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id,[offer.files[1].id]));};
+  const huge={name:'ignorado.bin',size:transfer.MAX_MEMORY+1,type:'',slice(){throw new Error('Não deveria ler o arquivo grande');}};
+  try{await p.left.send([huge,new File(['pequeno'],'escolhido.txt')]);assert.equal(p.blobs.length,1);assert.equal(p.blobs[0].info.name,'escolhido.txt');}finally{p.left.close();p.right.close();}
+});
+test('aceite com IDs desconhecidos duplicados ou lista vazia nunca envia bytes',async()=>{
+  for(const ids of [[],['desconhecido'],['same','same']]){
+    const p=pair();p.right.hooks.offer=offer=>{if(offer)p.right.control({type:'accept',selected:ids});};
+    try{await assert.rejects(()=>p.left.send([new File(['segredo'],'arquivo.txt')]),/Seleção/);assert.equal(p.blobs.length,0);}finally{p.left.close();p.right.close();}
+  }
+});
+test('receptor rejeita arquivo fora da selecao e selecao vazia nao inicia recebimento',async()=>{
+  const p=pair();p.right.hooks.offer=()=>{};
+  const offer={id:'lote',files:[{id:'a',name:'a',size:1,type:''},{id:'b',name:'b',size:1,type:''}]};
+  try{
+    await p.right.message(JSON.stringify({type:'offer',offer,selection:1}));p.right.accept(undefined,offer.id,[]);assert.equal(p.right.accepted,false);
+    p.right.accept(undefined,offer.id,['b']);await assert.rejects(()=>p.right.message(JSON.stringify({type:'file',id:'a',offset:0})),/Sequência/);
+  }finally{p.left.close();p.right.close();}
+});
+test('perda da confirmacao final preserva selecao parcial sem duplicar arquivos',async()=>{
+  const p=pair();let dropped=false;
+  p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id,[offer.files[1].id]));};
+  const original=p.right.channel.send.bind(p.right.channel);
+  p.right.channel.send=value=>{if(typeof value==='string'&&JSON.parse(value).type==='done-ack'&&!dropped){dropped=true;setTimeout(()=>reconnectTransport(p),0);return;}original(value);};
+  try{await p.left.send([new File(['ignorar'],'ignorado'),new File(['aceito'],'aceito')]);await new Promise(r=>setTimeout(r,20));assert.ok(dropped);assert.equal(p.blobs.length,1);assert.equal(p.blobs[0].info.name,'aceito');assert.ok(p.completions.every(c=>c.count===1));}finally{p.left.close();p.right.close();}
+});
+test('remetente antigo permite lote completo mas recusa selecao parcial',async()=>{
+  const p=pair();p.right.hooks.offer=()=>{};
+  const offer={id:'antigo',files:[{id:'a',name:'a',size:0,type:''},{id:'b',name:'b',size:0,type:''}]};
+  try{await p.right.message(JSON.stringify({type:'offer',offer}));p.right.accept(undefined,offer.id,['a']);assert.equal(p.right.accepted,false);p.right.accept();assert.equal(p.right.accepted,true);}finally{p.left.close();p.right.close();}
+});
 test('pausa nos dois aparelhos preserva progresso e hash inclusive apos reconexao',async()=>{
   const p=pair();const bytes=Buffer.alloc(3*transfer.FLOW_WINDOW+37,97);let requested=false;
   const progress=p.right.hooks.progress;
