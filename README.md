@@ -46,13 +46,13 @@ A integração GitHub/Vercel publica novos commits da branch `main`. `vercel.jso
 
 ## Desenvolvimento
 
+### Integridade, pausa e miniaturas
+
 ### Conferência visual dos aparelhos
 
 Depois de abrir o canal WebRTC, cada aparelho deriva quatro palavras em português a partir de SHA-256 do par ordenado de fingerprints SHA-256 dos certificados DTLS e do código da sala, com separação de domínio/versionamento. São quatro índices de 11 bits na lista portuguesa do `@scure/bip39` (44 bits de resumo visual; não se trata de uma seed BIP39). O navegador verifica o certificado DTLS contra o fingerprint do SDP. As palavras não usam somente o código público, não são senha e não provam a identidade pessoal do participante: o usuário deve comparar todas as quatro, na mesma ordem, entre as duas telas.
 
 O remetente confirma para liberar a oferta; o receptor confirma antes de aceitar. As palavras ficam visíveis no remetente, na espera do receptor e no diálogo de seleção. Ausência/ambiguidade de fingerprint impede a conexão. O certificado local é gerado uma vez por sessão e reutilizado nas reconexões nos navegadores que suportam `generateCertificate`; o par é fixado na primeira abertura do canal. Uma troca de certificado posterior interrompe a recuperação em vez de continuar com outra identificação. Os certificados privados ficam somente na memória do navegador. Para a conferência visual, atualize as duas páginas antes de conectar.
-
-### Integridade, pausa e miniaturas
 
 O receptor pode selecionar parte do lote antes de aceitar. A negociação `selection:1` anuncia o suporte; a confirmação informa IDs exclusivos pertencentes à oferta original. A ordem original é preservada, e o remetente não lê nem envia o conteúdo dos itens recusados. Progresso, limites de memória, destino em disco e contagens finais usam somente os itens escolhidos. A seleção fica fixa durante a retomada, inclusive se a confirmação final se perder. A autorização do receptor também rejeita cabeçalhos de arquivos não selecionados. Com versões antigas sem essa negociação, o recebimento permanece disponível para o lote completo.
 
