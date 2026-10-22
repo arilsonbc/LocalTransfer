@@ -8,14 +8,15 @@ export const FLOW_WINDOW = 1024 * 1024;
 export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Promise<void>;abort:()=>Promise<void>;preview?:()=>Promise<Blob|null>};
 export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string;integrity?:"verified"|"unavailable"};
-export type Offer = {id:string;files:FileInfo[]};
-type ResumePoint={index:number;offset:number};
+export type Offer = {id:string;files:FileInfo[];selectable?:boolean};
+type ResumePoint={index:number;offset:number;selected?:unknown};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
   pause?:(local:boolean,remote:boolean,supported:boolean)=>void;
   notice?:(message:string)=>void;
   integrity?:(id:string,verified:boolean)=>void;
+  selection?:(count:number)=>void;
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
@@ -47,6 +48,9 @@ export class TransferConnection {
   private pollTimer:ReturnType<typeof setTimeout>|null=null;
   private connectTimer:ReturnType<typeof setTimeout>|null=null;
   private incoming:Offer|null=null;
+  private incomingSelectable=false;
+  private incomingSelected:string[]|null=null;
+  private outgoingSelected:string[]|null=null;
   private accepted=false;
   private receiving:{info:FileInfo;chunks:ArrayBuffer[];bytes:number;sink:ReceiveSink|null;hash:ReturnType<typeof newSha256>}|null=null;
   private sinkFactory:SinkFactory|null=null;
@@ -112,6 +116,8 @@ export class TransferConnection {
     };
   }
   get busy() {return this.outgoing || !!this.incoming;}
+  private receivedFiles(){return this.incoming?.files.filter(f=>!this.incomingSelected||this.incomingSelected.includes(f.id))||[];}
+  private showOffer(){if(this.incoming)this.hooks.offer({...this.incoming,selectable:this.incomingSelectable});}
   get paused(){return this.localPaused||this.remotePaused;}
   get pauseSupported(){return this.outgoing?this.peerPause:this.incomingPause&&this.accepted;}
   private updatePause(local=this.localPaused,remote=this.remotePaused){
@@ -145,7 +151,7 @@ export class TransferConnection {
     const now=Date.now();
     if(current===0 || current===total || now-this.lastProgressAt>=100){
       this.lastProgressAt=now;
-      const batch=direction==="receive"?this.incoming:this.outgoingOffer;
+      const batch=direction==="receive"&&this.incoming?{...this.incoming,files:this.receivedFiles()}:this.outgoingOffer;
       const index=direction==="receive"?this.receiveIndex:this.sendIndex;
       const batchTotal=batch?.files.reduce((n,file)=>n+file.size,0)||total;
       const completed=batch?.files.slice(0,index).reduce((n,file)=>n+file.size,0)||0;
@@ -324,23 +330,23 @@ export class TransferConnection {
       case "offer": {
         if(!validateOffer(msg.offer)){this.control({type:"reject",reason:"Lote inválido ou maior que 100 GB."});return;}
         if(this.completedOffer?.id===msg.offer.id && JSON.stringify(this.completedOffer)===JSON.stringify(msg.offer)){
-          this.control({type:"accept",flowControl:1,resume:1,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:msg.offer.files.length,offset:0});return;
+          this.control({type:"accept",flowControl:1,resume:1,selected:this.incomingSelectable?this.incomingSelected:undefined,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.incomingSelected?.length??msg.offer.files.length,offset:0});return;
         }
         if(this.incoming?.id===msg.offer.id && JSON.stringify(this.incoming)===JSON.stringify(msg.offer)){
           if(this.incomingPause)this.updatePause(undefined,msg.paused===true);
-          if(this.accepted)this.sendAcceptance();else this.hooks.offer(this.incoming);
+          if(this.accepted)this.sendAcceptance();else this.showOffer();
           return;
         }
         if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
         this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
         this.incomingPause=msg.pause===1;this.updatePause(false,false);
-        this.hooks.offer(this.incoming);return;
+        this.incomingSelectable=msg.selection===1;this.incomingSelected=null;this.showOffer();return;
       }
-      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.peerPause=msg.pause===1;this.updatePause(undefined,this.peerPause&&msg.paused===true);this.resolve("accept",this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0});return;
+      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.peerPause=msg.pause===1;this.updatePause(undefined,this.peerPause&&msg.paused===true);this.resolve("accept",{...(this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0}),selected:msg.selected});return;
       case "pause": if(this.busy&&this.pauseSupported&&msg.id===(this.outgoingOffer||this.incoming)?.id&&typeof msg.paused==="boolean")this.updatePause(undefined,msg.paused);return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
-        const info=this.incoming?.files[this.receiveIndex];
+        const info=this.receivedFiles()[this.receiveIndex];
         if(!this.accepted || !info || msg.id!==info.id)throw new Error("Sequência de arquivos inválida.");
         const offset=msg.offset??0;
         if(this.receiving && this.incomingResume && this.receiving.info.id===info.id && offset===this.receiving.bytes){this.progress(info.name,offset,info.size,"receive");return;}
@@ -369,8 +375,8 @@ export class TransferConnection {
       case "done-confirm": if(this.completedOffer?.id===msg.id)this.completed=true;return;
       case "done": {
         if(this.completedOffer?.id===msg.id){this.control({type:"done-ack",id:msg.id});return;}
-        if(!this.incoming || !this.accepted || this.receiving || this.receiveIndex!==this.incoming.files.length)throw new Error("Transferência incompleta.");
-        const count=this.incoming.files.length;
+        if(!this.incoming || !this.accepted || this.receiving || this.receiveIndex!==this.receivedFiles().length)throw new Error("Transferência incompleta.");
+        const count=this.receivedFiles().length;
         const acknowledge=this.incomingResume;
         const completedId=this.incoming.id;
         if(acknowledge){
@@ -384,9 +390,13 @@ export class TransferConnection {
       case "cancel": this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
     }
   }
-  accept(sinkFactory?:SinkFactory,offerId?:string) {
-    if(!this.incoming || (offerId && this.incoming.id!==offerId))return;
-    const total=this.incoming.files.reduce((n,file)=>n+file.size,0);
+  accept(sinkFactory?:SinkFactory,offerId?:string,selectedIds?:string[]) {
+    if(!this.incoming || this.accepted || (offerId && this.incoming.id!==offerId))return;
+    const ids=selectedIds??this.incoming.files.map(f=>f.id);
+    if(!ids.length||new Set(ids).size!==ids.length||ids.some(id=>!this.incoming!.files.some(f=>f.id===id))){this.hooks.error("Escolha pelo menos um arquivo válido para receber.");return;}
+    if(!this.incomingSelectable&&ids.length!==this.incoming.files.length){this.hooks.error("Atualize o site no aparelho que envia para escolher apenas alguns arquivos.");return;}
+    this.incomingSelected=this.incoming.files.filter(f=>ids.includes(f.id)).map(f=>f.id);
+    const total=this.receivedFiles().reduce((n,file)=>n+file.size,0);
     if(total>MAX_MEMORY && (!sinkFactory || !this.incomingFlow)){
       const message=!sinkFactory?"Para receber mais de 200 MB, escolha uma pasta usando Chrome ou Edge no computador.":"Atualize o site no aparelho que envia para transferir arquivos grandes.";
       this.reject();this.hooks.error(message);return;
@@ -394,7 +404,7 @@ export class TransferConnection {
     this.sinkFactory=sinkFactory||null;
     this.accepted=true;this.updatePause(false,false);this.hooks.offer(null);this.sendAcceptance();
   }
-  private sendAcceptance(){this.control({type:"accept",flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
+  private sendAcceptance(){this.control({type:"accept",selected:this.incomingSelectable?this.incomingSelected:undefined,flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
@@ -416,6 +426,7 @@ export class TransferConnection {
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
     this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
+    this.outgoingSelected=null;
     this.peerPause=false;this.updatePause(false,false);
     try {
       for(let attempt=0;;attempt++){
@@ -426,7 +437,7 @@ export class TransferConnection {
           await this.waitForChannel();
         }
       }
-      this.completed=true;this.hooks.complete("send",files.length);
+      this.completed=true;this.hooks.complete("send",this.outgoingSelected?.length??files.length);
     } catch(e) {
       if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
@@ -443,18 +454,25 @@ export class TransferConnection {
     if(this.stopped || this.cancelled)throw new Error("Transferência cancelada.");
     if(generation!==this.transportGeneration || this.recovering || this.channel?.readyState!=="open")throw new TransportInterrupted("Reconectando…");
   }
-  private async sendAttempt(files:File[],offer:Offer){
+  private async sendAttempt(sourceFiles:File[],offer:Offer){
       await this.waitForChannel();
       const generation=this.transportGeneration;
       const accept=this.wait<ResumePoint>("accept",600000);
-      this.control({type:"offer",offer,flowControl:1,resume:1,pause:1,paused:this.localPaused,integrity:"sha256"});
+      this.control({type:"offer",offer,selection:1,flowControl:1,resume:1,pause:1,paused:this.localPaused,integrity:"sha256"});
       const point=await accept;
       this.checkTransport(generation);
+      const requested=point?.selected===undefined?offer.files.map(f=>f.id):point.selected;
+      if(!Array.isArray(requested)||!requested.length||requested.length>offer.files.length||requested.some(id=>typeof id!=="string"||!offer.files.some(f=>f.id===id))||new Set(requested).size!==requested.length)throw new Error("Seleção de arquivos inválida recebida.");
+      const chosen=offer.files.filter(f=>requested.includes(f.id));
+      const selected=chosen.map(f=>f.id);
+      if(this.outgoingSelected&&JSON.stringify(this.outgoingSelected)!==JSON.stringify(selected))throw new Error("A seleção mudou durante a retomada. Crie outra sala.");
+      this.outgoingSelected=selected;this.outgoingOffer={...offer,files:chosen};this.hooks.selection?.(chosen.length);
+      const files=chosen.map(f=>sourceFiles[offer.files.findIndex(original=>original.id===f.id)]);
       if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
-      for(const info of offer.files.slice(0,point.index))this.hooks.integrity?.(info.id,this.peerIntegrity);
+      for(const info of chosen.slice(0,point.index))this.hooks.integrity?.(info.id,this.peerIntegrity);
       for(let i=point.index;i<files.length;i++) {
         this.sendIndex=i;
-        const file=files[i],info=offer.files[i];
+        const file=files[i],info=chosen[i];
         this.checkTransport(generation);
         const start=i===point.index?point.offset:0;
         if(this.sendingHash?.index!==i)this.sendingHash={index:i,hash:new SendingIntegrity()};
