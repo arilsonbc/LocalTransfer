@@ -437,7 +437,7 @@ export class TransferConnection {
           await this.waitForChannel();
         }
       }
-      this.completed=true;this.hooks.complete("send",this.outgoingSelected?.length??files.length);
+      this.completed=true;this.hooks.complete("send",this.outgoingOffer?.files.length??files.length);
     } catch(e) {
       if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
