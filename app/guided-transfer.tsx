@@ -37,7 +37,6 @@ export default function GuidedTransfer() {
   const [acceptedCount,setAcceptedCount]=useState(0);
   const [peerWords,setPeerWords]=useState<string|null>(null);
   const [wordsConfirmed,setWordsConfirmed]=useState(false);
-  const confirmedWords=useRef<string|null>(null);
   const [received, setReceived] = useState<Received[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState("");
@@ -89,11 +88,11 @@ export default function GuidedTransfer() {
 
   // Connecting is sufficient: no second Send button is needed after pairing.
   useEffect(() => {
-    if (mode === "send" && connected && wordsConfirmed && peerWords && files.length && !autoStarted.current) {
+    if (mode === "send" && connected && files.length && !autoStarted.current) {
       autoStarted.current = true;
       void sendFiles();
     }
-  }, [mode, connected, files,wordsConfirmed,peerWords]); // sendFiles uses the selected batch for this connection.
+  }, [mode, connected, files]); // sendFiles uses the selected batch for this connection.
 
   function remember(direction: "send" | "receive", count: number) {
     try {
@@ -111,7 +110,7 @@ export default function GuidedTransfer() {
     const active = () => epoch.current === currentEpoch;
     setVerified({});setPause({local:false,remote:false,supported:false});
     const conn = new TransferConnection(s, {
-      verification:words=>{if(active()){setPeerWords(words);if(words&&confirmedWords.current!==words)setWordsConfirmed(false);}},
+      verification:words=>{if(active()){setPeerWords(words);setWordsConfirmed(false);}},
       selection:count=>{if(active())setAcceptedCount(count);},
       pause:(local,remote,supported)=>{if(active())setPause({local,remote,supported});},
       integrity:(id,value)=>{if(active())setVerified(old=>({...old,[id]:value}));},
@@ -176,7 +175,6 @@ export default function GuidedTransfer() {
   async function sendFiles() {
     const conn = connection.current;
     if (!conn || !files.length) return;
-    if(!peerWords||!wordsConfirmed||conn.verificationPhrase!==peerWords){setError("Confira as palavras nos dois aparelhos para liberar o envio.");return;}
     setSending(true); setError(""); setComplete(false);
     try { await conn.send(files); }
     catch (e) { if (connection.current === conn) setError(e instanceof Error ? e.message : "O envio foi interrompido."); }
@@ -187,7 +185,7 @@ export default function GuidedTransfer() {
     epoch.current++; connection.current?.close(); connection.current = null;
     const old = sessionRef.current; sessionRef.current = null;
     if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
-    setPeerWords(null);confirmedWords.current=null;setWordsConfirmed(false);setSelectedIds([]);offeredId.current=null;setAcceptedCount(0);setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
+    setPeerWords(null);setWordsConfirmed(false);setSelectedIds([]);offeredId.current=null;setAcceptedCount(0);setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
     setOffer(null); setProgress(null); setComplete(false); setError("");setPause({local:false,remote:false,supported:false});setVerified({});setDiagnostics(null);setDiagnosticCopied(false); autoStarted.current = false;
   }
 
@@ -257,7 +255,7 @@ export default function GuidedTransfer() {
           {!files.length ? <section className={`flow-card choose-files ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFiles(e.dataTransfer.files); }}>
             <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 100 GB por vez · Para receber mais de 200 MB, use Chrome ou Edge no computador.</small>
           </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{acceptedCount} de {files.length} arquivo(s) foram aceitos e chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><p className="integrity-badge">{Object.values(verified).filter(Boolean).length===acceptedCount?"Integridade SHA-256 confirmada em todos os arquivos.":"Verificação adicional indisponível. Atualize as duas páginas nos próximos envios."}</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
-            {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{state==="reconnecting" ? "Recuperando a conexão…" : connected ? (sending ? (progress ? (pause.local||pause.remote?"Transferência pausada.":"Enviando seus arquivos…") : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p>{(connected || peerWords) && <><PeerConfirmation words={peerWords}/>{!sending&&<label className="peer-match-check"><input type="checkbox" checked={wordsConfirmed} disabled={!peerWords} onChange={event=>{confirmedWords.current=event.target.checked?peerWords:null;setWordsConfirmed(event.target.checked);}}/><span>Conferi as palavras no aparelho que vai receber.</span></label>}</>}<div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button>{!connected && state!=="reconnecting" && <InviteCard code={session.code}/>}<div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "Confira as palavras nas duas telas para liberar o envio.") : state==="reconnecting" ? status : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
+            {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{state==="reconnecting" ? "Recuperando a conexão…" : connected ? (sending ? (progress ? (pause.local||pause.remote?"Transferência pausada.":"Enviando seus arquivos…") : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p>{(connected || peerWords) && <PeerConfirmation words={peerWords}/>}<div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button>{!connected && state!=="reconnecting" && <InviteCard code={session.code}/>}<div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "O envio começa após a confirmação no outro aparelho.") : state==="reconnecting" ? status : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
             <div className="batch-summary"><FileIcon size={19} /><span><strong>{files.length} arquivo(s) selecionado(s)</strong><small>{size(total)}</small></span>{!connected && !loading && <button className="text-button" onClick={() => picker.current?.click()}>Adicionar mais<Plus size={14} /></button>}</div>
             <details className="file-details"><summary>Ver arquivos selecionados</summary>{files.map((file, i) => <div className="file-line" key={`${file.name}-${i}`}><FileThumbnail file={file} name={file.name}/><span>{file.name}</span><small>{size(file.size)}</small></div>)}</details>
           </section>}
@@ -266,7 +264,7 @@ export default function GuidedTransfer() {
           {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>{destination ? <>Arquivos salvos na pasta <strong>{destination}</strong>.</> : <>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</>}</p></div>}
         </>}
 
-        {mode==="receive"&&!offer&&!complete&&peerWords&&<PeerConfirmation words={peerWords}/>}{turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
+        {turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
         {(sending || progress) && <TransferProgress progress={progress} pause={pause} reconnecting={state==="reconnecting"} awake={awake} onPause={()=>connection.current?.setPaused(!pause.local)} onCancel={()=>{connection.current?.cancel();setSending(false);setProgress(null);setError("Transferência cancelada. Você pode tentar novamente.");}} onReconnect={()=>connection.current?.retry()}/>}
@@ -278,7 +276,7 @@ export default function GuidedTransfer() {
       <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
     </main>
     <footer className="site-footer"><span>LocalTransfer</span><span>Do seu aparelho para o outro.</span></footer>
-    {offer && <ReceiveOffer words={peerWords} confirmed={wordsConfirmed} onConfirm={value=>{confirmedWords.current=value?peerWords:null;setWordsConfirmed(value);}} offer={offer} selected={selectedIds} peer={peer} busy={choosingFolder} diskSupported={diskSupported} error={error} onChange={ids=>{setSelectedIds(ids);setError("");}} onAccept={()=>void acceptOffer()} onReject={()=>connection.current?.reject()}/>}
+    {offer && <ReceiveOffer words={peerWords} confirmed={wordsConfirmed} onConfirm={setWordsConfirmed} offer={offer} selected={selectedIds} peer={peer} busy={choosingFolder} diskSupported={diskSupported} error={error} onChange={ids=>{setSelectedIds(ids);setError("");}} onAccept={()=>void acceptOffer()} onReject={()=>connection.current?.reject()}/>}
   </div>;
 }
 
