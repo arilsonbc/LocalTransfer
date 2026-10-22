@@ -15,7 +15,9 @@ const service=await import(serviceUrl);
 const progressUrl=source('lib/progress.ts');
 const integrityUrl=source('lib/integrity.ts',{'@noble/hashes/sha2.js':import.meta.resolve('@noble/hashes/sha2.js')});
 const integrity=await import(integrityUrl);
-const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl});
+const verificationUrl=source('lib/peer-verification.ts',{'@scure/bip39/wordlists/portuguese.js':import.meta.resolve('@scure/bip39/wordlists/portuguese.js')});
+const verification=await import(verificationUrl);
+const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl,'./peer-verification':verificationUrl});
 const transfer=await import(transferUrl);
 const photoUrl=source('lib/photo-preview.ts');
 const photo=await import(photoUrl);
@@ -44,6 +46,16 @@ const ice=await import(source('app/api/rooms/[code]/ice/route.ts',{'../../../../
 const request=(path,method='GET',body,token,origin='https://localtransfer.test')=>new Request(`https://localtransfer.test${path}`,{method,headers:{Origin:origin,'Content-Type':'application/json','x-forwarded-for':crypto.randomUUID(),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
 const context=code=>({params:Promise.resolve({code})});
 async function newRoom(){const response=await create.POST(request('/api/rooms','POST',{name:'Computador'}));assert.equal(response.status,201);return response.json();}
+const certSdp=byte=>'v=0\r\na=fingerprint:sha-256 '+Array(32).fill(byte).join(':')+'\r\n';
+test('palavras sao simetricas e vinculadas aos certificados e a sala',async()=>{
+  const left=certSdp('AA'),right=certSdp('bb');
+  const a=await verification.derivePeerVerification(left,right,'ABCDEFGH');const b=await verification.derivePeerVerification(right,left,'ABCDEFGH');
+  assert.deepEqual(a,b);assert.equal(a.words.split(' · ').length,4);
+  assert.notEqual((await verification.derivePeerVerification(left,certSdp('cc'),'ABCDEFGH')).words,a.words);
+  assert.notEqual((await verification.derivePeerVerification(left,right,'BCDEFGHJ')).words,a.words);
+  assert.deepEqual(await verification.derivePeerVerification(left+left,right,'ABCDEFGH'),a);
+  for(const invalid of ['', 'a=fingerprint:sha-256 00:11\r\n',left+certSdp('cc')])await assert.rejects(()=>verification.derivePeerVerification(invalid,right,'ABCDEFGH'),/conferir/);
+});
 
 test('consumo TURN usa egress da Cloudflare, cache compartilhado e orcamento atualizado',async()=>{
   const original=globalThis.fetch;const env={...process.env};const cache=new Map();let calls=0;
@@ -335,6 +347,23 @@ function reconnectTransport(p){
   },5);
 }
 async function until(predicate,timeout=2000){const start=Date.now();while(!predicate()){if(Date.now()-start>timeout)throw new Error('Condition timed out');await new Promise(r=>setTimeout(r,5));}}
+test('conferencia exige confirmacao explicita e fixa identidade durante retomada',async()=>{
+  const p=pair();
+  p.left.identityEnabled=true;p.right.identityEnabled=true;
+  p.left.pc={localDescription:{sdp:certSdp('aa')},remoteDescription:{sdp:certSdp('bb')},close(){}};
+  p.right.pc={localDescription:{sdp:certSdp('bb')},remoteDescription:{sdp:certSdp('aa')},close(){}};
+  try{
+    p.left.channel.onopen();p.right.channel.onopen();await Promise.all([p.left.queue,p.right.queue]);
+    const words=p.left.verificationPhrase;assert.ok(words);assert.equal(p.right.verificationPhrase,words);
+    p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>{p.right.accept(undefined,offer.id);assert.equal(p.right.accepted,false);p.right.accept(undefined,offer.id,undefined,true);});};
+    await p.left.send([new File(['confirmado'],'arquivo.txt')]);assert.equal(p.blobs.length,1);
+    // The same certificate pair can reconnect; a different pair cannot continue.
+    p.left.completed=false;p.right.completed=false;reconnectTransport(p);await new Promise(r=>setTimeout(r,30));
+    assert.equal(p.left.verificationPhrase,words);assert.equal(p.right.verificationPhrase,words);
+    p.right.pc.remoteDescription={sdp:certSdp('cc')};reconnectTransport(p);await new Promise(r=>setTimeout(r,30));
+    assert.equal(p.right.stopped,true);assert.equal(p.right.verificationPhrase,null);assert.ok(p.errors.some(e=>e.includes('identificação')));
+  }finally{p.left.close();p.right.close();}
+});
 test('selecao parcial nao le arquivos recusados e preserva selecao hash e progresso apos queda',async()=>{
   const p=pair();let dropped=false;const stats=[];
   p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id,[offer.files[1].id,offer.files[3].id]));};
