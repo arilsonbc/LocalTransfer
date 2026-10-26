@@ -104,3 +104,10 @@ A rota TURN usa TLS na porta 443, evitando tentativas nos vários caminhos UDP e
 Implementação web própria, inspirada no uso de transferência entre dispositivos do LocalSend. Não é um fork do aplicativo Flutter nem usa seu protocolo de transferência. LocalTransfer usa WebRTC e salas.
 
 Código sob Apache-2.0. Avisos do template original e das dependências estão preservados em `NOTICE`, `build/sites-vite-plugin.LICENSE` e `vendor/`. Não há vínculo oficial com o LocalSend.
+
+### Avisos de saída e conexão
+
+Durante uma transferência, inclusive pausada, o site pede confirmação ao voltar ao início e solicita ao navegador o aviso ao fechar ou atualizar a aba. Arquivos recebidos que ainda estão disponíveis apenas na página também mantêm esse aviso. O navegador escolhe o texto do diálogo; em celulares, fechar o aplicativo ou encerrar o navegador pode não dispará-lo. O aviso não salva a sessão após fechar a página.
+
+O estado da conexão informa espera, preparação, reconexão, indisponibilidade e falta de internet detectada pelo navegador. A indicação de internet é uma pista local, não um teste de acesso ao outro aparelho. Na reconexão, mantenha as páginas abertas para preservar o progresso confirmado.
+
