@@ -170,7 +170,7 @@ export class TransferConnection {
       if(this.session.role==="host") {
         await this.hostOffer();
         this.hooks.state("waiting","Sala pronta. Conecte o outro aparelho.");
-      } else {this.createPeer(this.iceServers);this.hooks.state("connecting","Estabelecendo conexão segura…");}
+      } else {this.createPeer(this.iceServers);this.hooks.state(this.recovering?"reconnecting":"connecting",this.relayOnly?"Tentando uma rota pelo servidor de retransmissão. Isso pode levar alguns segundos…":"Buscando uma rota segura entre os aparelhos. Isso pode levar alguns segundos…");}
       void this.poll();
     } catch(e) {if(!this.stopped) this.fail(e instanceof Error?e.message:"Não foi possível conectar.");}
   }
@@ -180,7 +180,7 @@ export class TransferConnection {
   private pauseTransport(){
     this.recovering=true;this.meter.reset();this.deadline();
     this.rejectAll(new TransportInterrupted("Reconectando…"));
-    this.hooks.state("reconnecting","Reconectando automaticamente. Os dados já recebidos serão preservados enquanto as páginas estiverem abertas.");
+    this.hooks.state("reconnecting","A conexão caiu. Estamos tentando outra rota automaticamente. Mantenha os dois aparelhos com internet e as páginas abertas; os dados confirmados serão preservados.");
   }
   retry(){
     if(this.stopped || this.completed || this.negotiating || this.retryTimer)return;
@@ -250,7 +250,7 @@ export class TransferConnection {
           this.revision=revision;this.relayOnly=this.relayOnly||description.relay===true;
           this.createPeer(this.iceServers);
         }
-        this.hooks.state("connecting","Estabelecendo conexão segura…");
+        this.hooks.state(this.recovering?"reconnecting":"connecting",this.relayOnly?"Tentando uma rota pelo servidor de retransmissão. Isso pode levar alguns segundos…":"Buscando uma rota segura entre os aparelhos. Isso pode levar alguns segundos…");
         await this.pc.setRemoteDescription({type:description.type,sdp:description.sdp});
         if(this.session.role==="guest") {
           await this.pc.setLocalDescription(await this.pc.createAnswer());
