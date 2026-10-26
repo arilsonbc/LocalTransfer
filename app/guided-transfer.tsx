@@ -49,6 +49,7 @@ export default function GuidedTransfer() {
   const [choosingFolder,setChoosingFolder]=useState(false);
   const [diagnostics,setDiagnostics]=useState<ConnectionDiagnostics|null>(null);
   const [diagnosticCopied,setDiagnosticCopied]=useState(false);
+  const [offline,setOffline]=useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const connection = useRef<TransferConnection | null>(null);
   const sessionRef = useRef<Session | null>(null);
@@ -58,6 +59,8 @@ export default function GuidedTransfer() {
   const epoch = useRef(0);
   const total = files.reduce((n, f) => n + f.size, 0);
   const connected = state === "connected";
+  const transferActive=!complete && (sending || !!progress);
+  const hasUnsavedFiles=received.some(file=>!!file.url);
   const awake=useKeepAwake((sending || !!progress)&&!pause.local&&!pause.remote);
 
   useEffect(() => {
@@ -77,11 +80,17 @@ export default function GuidedTransfer() {
   },[]);
 
   useEffect(() => {
-    if (!sending && !progress && !received.length) return;
+    if (!transferActive && !hasUnsavedFiles) return;
     const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", prevent);
     return () => window.removeEventListener("beforeunload", prevent);
-  }, [sending, progress, received.length]);
+  }, [transferActive, hasUnsavedFiles]);
+
+  useEffect(()=>{
+    const update=()=>setOffline(!navigator.onLine);
+    update();window.addEventListener("online",update);window.addEventListener("offline",update);
+    return ()=>{window.removeEventListener("online",update);window.removeEventListener("offline",update);};
+  },[]);
 
   // Connecting is sufficient: no second Send button is needed after pairing.
   useEffect(() => {
@@ -186,6 +195,7 @@ export default function GuidedTransfer() {
   }
 
   function restart(next: Mode = "choose") {
+    if(transferActive && !window.confirm("A transferência ainda não terminou. Voltar ao início vai interrompê-la. Deseja sair mesmo assim?"))return;
     disconnect(); setFiles([]); setCode(""); setMode(next); setCopied(false);
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   }
@@ -258,6 +268,12 @@ export default function GuidedTransfer() {
           {complete && <div className="received-heading"><span className="success-icon"><CheckCheck size={30} /></span><h2>Seus arquivos chegaram!</h2><p>{destination ? <>Arquivos salvos na pasta <strong>{destination}</strong>.</> : <>Toque em <strong>Salvar</strong> em cada arquivo para guardá-lo neste aparelho.</>}</p></div>}
         </>}
 
+        {session && !complete && <section className="connection-health" aria-label="Estado da conexão" role="status">
+          <strong>{offline?"Este aparelho está sem internet":state==="error"?"Não foi possível conectar":state==="reconnecting"?"Tentando reconectar os aparelhos…":connected?"Aparelhos conectados":state==="waiting"?"Aguardando o outro aparelho":"Conectando os aparelhos…"}</strong>
+          <p>{offline?"Ative o Wi-Fi ou os dados móveis. Mantenha as duas páginas abertas; tentaremos continuar quando a internet voltar.":state==="error"?"Confira a internet nos dois aparelhos. Se estiverem conectados, crie outro código e tente novamente.":state==="reconnecting"?status:connected?"A conexão está pronta. Os arquivos só são enviados depois do aceite de quem recebe.":status||"Preparando a conexão segura. Isso pode levar alguns segundos."}</p>
+          {(offline||state==="reconnecting")&&<small>Não atualize nem feche as páginas. Uma transferência em andamento pode continuar do ponto confirmado.</small>}
+        </section>}
+        {transferActive&&<p className="leave-warning" role="note">Transferência em andamento: não feche nem atualize esta página, mesmo durante uma pausa. Ao sair, você poderá precisar começar novamente.</p>}
         {turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
