@@ -11,6 +11,8 @@ import {type TransferStats} from "../lib/progress";
 import TransferProgress,{type PauseState} from "./transfer-progress";
 import FileThumbnail from "./file-thumbnail";
 import ReceiveOffer from "./receive-offer";
+import TransferSummary from "./transfer-summary";
+import {type BatchSummary} from "../lib/transfer-summary";
 import {archiveFiles} from "../lib/archive";
 import {useKeepAwake} from "./use-keep-awake";
 
@@ -35,6 +37,7 @@ export default function GuidedTransfer() {
   const [selectedIds,setSelectedIds]=useState<string[]>([]);
   const offeredId=useRef<string|null>(null);
   const [acceptedCount,setAcceptedCount]=useState(0);
+  const [summary,setSummary]=useState<BatchSummary|null>(null);
   const [skipped,setSkipped]=useState<string[]>([]);
   const [archiving,setArchiving]=useState(false);
   const [archiveUrl,setArchiveUrl]=useState<string|null>(null);
@@ -121,6 +124,7 @@ export default function GuidedTransfer() {
     const active = () => epoch.current === currentEpoch;
     setVerified({});setSkipped([]);setPause({local:false,remote:false,supported:false});
     const conn = new TransferConnection(s, {
+      summary:value=>{if(active())setSummary(value);},
       skipped:name=>{if(active())setSkipped(old=>[...old,name]);},
       selection:count=>{if(active())setAcceptedCount(count);},
       pause:(local,remote,supported)=>{if(active())setPause({local,remote,supported});},
@@ -196,7 +200,7 @@ export default function GuidedTransfer() {
     epoch.current++; connection.current?.close(); connection.current = null;
     const old = sessionRef.current; sessionRef.current = null;
     if (old) void api(`/api/rooms/${old.code}`, "DELETE", undefined, old.token).catch(() => {});
-    setSelectedIds([]);offeredId.current=null;setAcceptedCount(0);setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
+    setSummary(null);setSelectedIds([]);offeredId.current=null;setAcceptedCount(0);setSession(null); setState("idle"); setStatus(""); setPeer(""); setSending(false); setLoading(false);setTurnNotice("");
     setOffer(null); setProgress(null); setComplete(false); setError("");setPause({local:false,remote:false,supported:false});setVerified({});setDiagnostics(null);setDiagnosticCopied(false); autoStarted.current = false;
   }
 
@@ -207,6 +211,7 @@ export default function GuidedTransfer() {
   }
 
   function nextBatch(){
+    setSummary(null);
     setFiles([]);setComplete(false);setProgress(null);setError("");setVerified({});setSkipped([]);setAcceptedCount(0);autoStarted.current=false;
   }
 
@@ -293,6 +298,7 @@ export default function GuidedTransfer() {
           {(offline||state==="reconnecting")&&<small>Não atualize nem feche as páginas. Uma transferência em andamento pode continuar do ponto confirmado.</small>}
         </section>}
         {transferActive&&<p className="leave-warning" role="note">Transferência em andamento: não feche nem atualize esta página, mesmo durante uma pausa. Ao sair, você poderá precisar começar novamente.</p>}
+        {summary&&<TransferSummary summary={summary}/>}
         {skipped.length>0&&<div className="skip-summary" role="status"><strong>{skipped.length} arquivo(s) cancelado(s)</strong><ul>{skipped.map((name,i)=><li key={i}>{name}</li>)}</ul><p>Os outros arquivos continuam normalmente. Arquivos cancelados não entram na contagem de recebidos.</p></div>}
         {turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
