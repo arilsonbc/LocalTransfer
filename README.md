@@ -120,3 +120,8 @@ Salvar todos os arquivos (ZIP) prepara um arquivo ZIP local, sem compressão e s
 
 Cancelar somente este arquivo funciona no remetente e no destinatário atualizados, durante o arquivo atual. O parcial é descartado (ou a gravação é abortada), os demais continuam e a contagem final exclui cancelados. Se a transferência estiver pausada, continue para enviar os próximos. O cancelamento precisa chegar ao outro aparelho antes da finalização; um arquivo já concluído não é apagado. Cancelar transferência continua encerrando o lote todo.
 
+
+### Resumo da transferência
+
+Cada lote mostra um resumo local ao concluir, recusar, cancelar ou falhar: enviados (confirmados pelo destino), recebidos neste aparelho, recusados na seleção ou no aceite, cancelados, falhas/não concluídos, tamanho oferecido e tamanho concluído. Enviados e recebidos são contagens deste aparelho, não a soma dos dois lados. A duração começa na proposta do lote e inclui aceite, pausas e reconexões. Blocos parciais e tráfego de retransmissão não entram no tamanho concluído. O resumo não é salvo em servidor e é substituído no próximo lote. Após uma falha, o remetente pode ter menos confirmações do que os arquivos efetivamente concluídos no destinatário; confira os dois resumos.
+
