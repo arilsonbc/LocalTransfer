@@ -723,3 +723,20 @@ test('falha real de gravacao preserva resumo de falha nos dois lados sem falso s
   const reports=[];p.left.hooks.summary=value=>{if(value)reports.push(value);};p.right.hooks.summary=value=>{if(value)reports.push(value);};
   try{await assert.rejects(()=>p.left.send([new File([Buffer.alloc(transfer.FLOW_WINDOW)],'falha.bin')]));assert.equal(reports.length,2);assert.ok(reports.every(r=>r.outcome==='failed'&&r.failed===1&&r.completedBytes===0&&r.cancelled===0));assert.equal(p.blobs.length,0);}finally{p.left.close();p.right.close();}
 });
+
+
+test('conversor preserva proporcao nao amplia e limita dimensoes e entradas',async()=>{
+  const image=await import(source('lib/image-converter.ts'));
+  assert.deepEqual(image.imageDimensions(4000,2000,1920),{width:1920,height:960});
+  assert.deepEqual(image.imageDimensions(2000,4000,800),{width:400,height:800});
+  assert.deepEqual(image.imageDimensions(300,200,1920),{width:300,height:200});
+  assert.deepEqual(image.imageDimensions(8000,4000,0),{width:4096,height:2048});
+  assert.throws(()=>image.imageDimensions(10000,10000,1920),/40 megapixels/);
+  assert.throws(()=>image.imageDimensions(0,200,1920),/dimensões/);
+  assert.throws(()=>image.imageDimensions(100,100,-1),/inválido/);
+  assert.throws(()=>image.validateImage({name:'foto.svg',size:50}),/Escolha uma foto/);
+  assert.throws(()=>image.validateImage({name:'foto.jpg',size:21*1024*1024}),/20 MB/);
+  assert.throws(()=>image.validateImage({name:'foto.png',size:0}),/vazia/);
+  image.validateImage({name:'FOTO.HEIC',size:100});
+  assert.equal(image.imageOutputName('../foto.png','webp'),'__foto-convertida.webp');
+});
