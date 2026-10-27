@@ -269,6 +269,7 @@ export default function GuidedTransfer() {
           <button className="choice-card send-choice" onClick={() => { setError(""); setMode("send"); }}><span className="choice-icon"><ArrowUpRight size={34} /></span><h2>Enviar arquivos</h2><p>Os arquivos estão aqui e quero<br />{" "}mandar para outro aparelho.</p><span className="choice-action">Escolher o que enviar<ArrowRight size={18} /></span></button>
           <button className="choice-card receive-choice" onClick={() => { setError(""); setMode("receive"); }}><span className="choice-icon"><ArrowDownToLine size={30} /></span><h2>Receber arquivos</h2><p>Quero receber e salvar os arquivos<br />{" "}neste aparelho.</p><span className="choice-action">Digitar o código<ArrowRight size={18} /></span></button>
         </div>
+        <a className="image-tool-link" href="/converter"><strong>Converter imagens</strong><span>Troque fotos para JPG, PNG ou WebP e reduza o tamanho, sem enviar ao servidor.</span><ArrowRight size={20}/></a>
         <div className="example"><span className="example-icon"><HelpCircle size={20} /></span><p><strong>Vai passar fotos do celular para o computador?</strong><br />{" "}No celular, escolha <b>Enviar</b>. No computador, escolha <b>Receber</b>.</p></div>
       </section> : <section className="flow-page">
         <button className="back-button" onClick={() => restart()}><ArrowLeft size={16} />Voltar ao início</button>
