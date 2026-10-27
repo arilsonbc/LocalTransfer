@@ -613,3 +613,18 @@ test('varios lotes na mesma conexao exigem novo aceite e preservam arquivos ante
     assert.deepEqual(p.blobs.map(f=>f.info.name),['primeiro.txt','segundo.txt']);assert.equal(p.completions.length,4);assert.deepEqual(p.errors,[]);
   }finally{p.left.close();p.right.close();}
 });
+
+
+test('cancelar arquivo parcial pelo remetente ou receptor preserva os demais e aborta disco',async()=>{
+  for(const side of ['left','right']){
+    let aborted=0,closed=0,requested=false;const skipped=[];
+    const p=pair(true,async()=>({async write(){},async close(){closed++;},async abort(){aborted++;}}));
+    p.left.hooks.skipped=name=>skipped.push(name);p.right.hooks.skipped=name=>skipped.push(name);
+    p.right.hooks.progress=(name,bytes)=>{if(name==='cancelar.bin'&&bytes>=65536&&!requested){requested=true;p[side].skipCurrentFile();}};
+    try{
+      await p.left.send([new File(['antes'],'antes.txt'),new File([Buffer.alloc(3*transfer.FLOW_WINDOW)],'cancelar.bin'),new File(['depois'],'depois.txt')]);
+      assert.equal(aborted,1);assert.equal(closed,2);assert.deepEqual(p.blobs.map(f=>f.info.name),['antes.txt','depois.txt']);
+      assert.deepEqual(skipped,['cancelar.bin','cancelar.bin']);assert.ok(p.completions.every(c=>c.count===2));assert.deepEqual(p.errors,[]);
+    }finally{p.left.close();p.right.close();}
+  }
+});
