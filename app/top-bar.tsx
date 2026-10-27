@@ -25,6 +25,7 @@ export default function TopBar({onHome}:{onHome:()=>void}) {
     <header className="topbar"><div className="nav-header">
       <button className="brand" onClick={onHome} aria-label="LocalTransfer, voltar ao início"><span className="brand-icon"><ArrowLeftRight size={22}/></span><span>Local<strong>Transfer</strong></span></button>
       <nav className="topnav" aria-label="Navegação principal">
+        <a className="nav-item" href="/converter">Imagens</a>
         <button className="nav-item" onClick={()=>faq.current?.showModal()} aria-haspopup="dialog" aria-controls="faq-dialog"><HelpCircle size={17}/><span>Como funciona</span></button>
         <a className="nav-item" href="https://github.com/arilsonbc/LocalTransfer" target="_blank" rel="noopener noreferrer" aria-label="GitHub: código do LocalTransfer (abre em outra aba)"><CodeXml size={17}/><span>GitHub</span><ExternalLink className="external-icon" size={12}/></a>
         <button className="nav-item" onClick={()=>contact.current?.showModal()} aria-haspopup="dialog" aria-controls="contact-dialog"><Mail size={17}/><span>Contato</span></button>
