@@ -9,7 +9,7 @@ export type ReceiveSink = {write:(chunk:ArrayBuffer)=>Promise<void>;close:()=>Pr
 export type SinkFactory = (file:FileInfo,index:number)=>Promise<ReceiveSink>;
 export type FileInfo = {id:string;name:string;size:number;type:string;integrity?:"verified"|"unavailable"};
 export type Offer = {id:string;files:FileInfo[];selectable?:boolean};
-type ResumePoint={index:number;offset:number;selected?:unknown};
+type ResumePoint={index:number;offset:number;selected?:unknown;skipped?:unknown};
 export type Session = {code:string;token:string;role:"host"|"guest";expiresAt:number;peerName?:string};
 export type ConnectionDiagnostics={version:string;mode:string;connection:string;ice:string;gathering:string;relayCandidates:number;serverErrors:number[]};
 type Hooks = {
@@ -17,6 +17,7 @@ type Hooks = {
   notice?:(message:string)=>void;
   integrity?:(id:string,verified:boolean)=>void;
   selection?:(count:number)=>void;
+  skipped?:(name:string)=>void;
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
@@ -90,6 +91,17 @@ export class TransferConnection {
   private polling=false;
   private recovering=false;
   private completed=false;
+  private peerSkip=false;
+  private incomingSkip=false;
+  private skippedIds=new Set<string>();
+  private skipRequested:string|null=null;
+  private skippableId:string|null=null;
+  get canSkipFile(){return !this.recovering && (this.outgoing?this.peerSkip&&!!this.skippableId:this.incomingSkip&&!!this.receiving);}
+  skipCurrentFile(){
+    if(!this.canSkipFile)return;
+    if(!this.outgoing){this.control({type:"skip-request",batch:this.incoming?.id,id:this.receiving!.info.id});return;}
+    this.skipRequested=this.skippableId;this.resolve("unpaused");
+  }
   private retries=0;
   private retryTimer:ReturnType<typeof setTimeout>|null=null;
   private disconnectTimer:ReturnType<typeof setTimeout>|null=null;
@@ -103,7 +115,7 @@ export class TransferConnection {
     this.pc.onicecandidateerror=event=>{if(!this.serverErrors.includes(event.errorCode))this.serverErrors.push(event.errorCode);};
     this.pc.ondatachannel=e=>{if(generation===this.transportGeneration)this.bind(e.channel);};
     this.pc.onconnectionstatechange=()=>{
-      if(this.stopped || generation!==this.transportGeneration || this.completed) return;
+      if(this.stopped || generation!==this.transportGeneration) return;
       if(this.pc.connectionState==="failed")this.retry();
       if(this.pc.connectionState==="disconnected"){
         this.hooks.state("reconnecting","A internet oscilou. Mantenha as páginas abertas; vamos reconectar.");
@@ -139,7 +151,7 @@ export class TransferConnection {
     if(!this.recovering&&this.channel?.readyState==="open")this.control({type:"pause",id:(this.outgoingOffer||this.incoming)?.id,paused:value});
   }
   private async waitIfPaused(){
-    if(this.paused)await this.wait("unpaused",172800000);
+    if(this.paused && !this.skipRequested)await this.wait("unpaused",172800000);
     if(this.stopped||this.cancelled)throw new Error("Transferência cancelada.");
   }
   get reconnecting(){return this.recovering || (!this.completed && ["failed","disconnected"].includes(this.pc?.connectionState));}
@@ -183,8 +195,8 @@ export class TransferConnection {
     this.hooks.state("reconnecting","A conexão caiu. Estamos tentando outra rota automaticamente. Mantenha os dois aparelhos com internet e as páginas abertas; os dados confirmados serão preservados.");
   }
   retry(){
-    if(this.stopped || this.completed || this.negotiating || this.retryTimer)return;
-    if(this.completedOffer && !this.incoming && !this.outgoing)return;
+    if(this.stopped || this.negotiating || this.retryTimer)return;
+    this.completed=false;
     if(this.retries>=5){this.fail("Não foi possível recuperar a conexão. Confira a internet nos dois aparelhos e crie outra sala.");return;}
     this.retries++;this.pauseTransport();
     this.retryTimer=setTimeout(()=>{
@@ -227,8 +239,8 @@ export class TransferConnection {
     return api(`/api/rooms/${this.session.code}`,"POST",{description:JSON.stringify({type:this.pc.localDescription?.type,sdp:this.pc.localDescription?.sdp,revision:this.revision,relay:this.relayOnly})},this.session.token);
   }
   private async poll() {
-    if(this.stopped || this.completed || this.polling)return;
-    if(this.completedAt && Date.now()-this.completedAt>120000 && !this.incoming && !this.outgoing){this.completed=true;return;}
+    if(this.stopped || this.polling)return;
+
     this.polling=true;
     let negotiatingHere=false;
     try {
@@ -263,7 +275,7 @@ export class TransferConnection {
       if(!this.stopped && this.channel?.readyState!=="open" && (!this.negotiating || negotiatingHere)){this.negotiating=false;this.retry();}
     } finally {
       if(negotiatingHere)this.negotiating=false;this.polling=false;
-      if(!this.stopped && !this.completed){
+      if(!this.stopped){
         if(this.pollTimer)clearTimeout(this.pollTimer);
         this.pollTimer=setTimeout(()=>void this.poll(),this.channel?.readyState==="open"?5000:1500);
       }
@@ -282,7 +294,7 @@ export class TransferConnection {
         this.hooks.state("connected","Aparelhos conectados");
       });
     };
-    channel.onclose=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
+    channel.onclose=()=>{if(!this.stopped && this.channel===channel)this.retry();};
     channel.onerror=()=>{if(!this.stopped && this.channel===channel && !this.completed)this.retry();};
     channel.onmessage=event=>{
       if(this.stopped || this.channel!==channel)return;
@@ -330,7 +342,7 @@ export class TransferConnection {
       case "offer": {
         if(!validateOffer(msg.offer)){this.control({type:"reject",reason:"Lote inválido ou maior que 100 GB."});return;}
         if(this.completedOffer?.id===msg.offer.id && JSON.stringify(this.completedOffer)===JSON.stringify(msg.offer)){
-          this.control({type:"accept",flowControl:1,resume:1,selected:this.incomingSelectable?this.incomingSelected:undefined,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.incomingSelected?.length??msg.offer.files.length,offset:0});return;
+          this.control({type:"accept",flowControl:1,resume:1,selected:this.incomingSelectable?this.incomingSelected:undefined,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,skip:this.incomingSkip?1:0,skipped:[...this.skippedIds],index:this.incomingSelected?.length??msg.offer.files.length,offset:0});return;
         }
         if(this.incoming?.id===msg.offer.id && JSON.stringify(this.incoming)===JSON.stringify(msg.offer)){
           if(this.incomingPause)this.updatePause(undefined,msg.paused===true);
@@ -338,11 +350,22 @@ export class TransferConnection {
           return;
         }
         if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
-        this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
+        this.skippedIds.clear();this.skipRequested=null;this.incomingSkip=msg.skip===1;this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
         this.incomingPause=msg.pause===1;this.updatePause(false,false);
         this.incomingSelectable=msg.selection===1;this.incomingSelected=null;this.showOffer();return;
       }
-      case "accept": this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.peerPause=msg.pause===1;this.updatePause(undefined,this.peerPause&&msg.paused===true);this.resolve("accept",{...(this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0}),selected:msg.selected});return;
+      case "accept": this.peerSkip=msg.skip===1;this.peerFlow=msg.flowControl===1;this.peerResume=msg.resume===1;this.peerIntegrity=msg.integrity==="sha256";this.peerPause=msg.pause===1;this.updatePause(undefined,this.peerPause&&msg.paused===true);this.resolve("accept",{...(this.peerResume?{index:msg.index,offset:msg.offset}:{index:0,offset:0}),selected:msg.selected,skipped:msg.skipped});return;
+      case "skip-request":
+        if(this.outgoing&&this.peerSkip&&msg.batch===this.outgoingOffer?.id&&msg.id===this.skippableId)this.skipCurrentFile();return;
+      case "file-skip": {
+        const info=this.receivedFiles()[this.receiveIndex];
+        if(!this.incomingSkip||!this.accepted||msg.batch!==this.incoming?.id)throw new Error("Cancelamento de arquivo inválido.");
+        if(this.skippedIds.has(msg.id)){this.control({type:"skip-ack",id:msg.id});return;}
+        if(!info||msg.id!==info.id)throw new Error("Sequência de cancelamento inválida.");
+        await this.receiving?.sink?.abort();this.receiving=null;this.skippedIds.add(info.id);this.receiveIndex++;this.hooks.skipped?.(info.name);
+        this.control({type:"skip-ack",id:info.id});return;
+      }
+      case "skip-ack": this.resolve('skip:'+msg.id);return;
       case "pause": if(this.busy&&this.pauseSupported&&msg.id===(this.outgoingOffer||this.incoming)?.id&&typeof msg.paused==="boolean")this.updatePause(undefined,msg.paused);return;
       case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
@@ -376,7 +399,7 @@ export class TransferConnection {
       case "done": {
         if(this.completedOffer?.id===msg.id){this.control({type:"done-ack",id:msg.id});return;}
         if(!this.incoming || !this.accepted || this.receiving || this.receiveIndex!==this.receivedFiles().length)throw new Error("Transferência incompleta.");
-        const count=this.receivedFiles().length;
+        const count=this.receivedFiles().length-this.skippedIds.size;
         const acknowledge=this.incomingResume;
         const completedId=this.incoming.id;
         if(acknowledge){
@@ -404,7 +427,7 @@ export class TransferConnection {
     this.sinkFactory=sinkFactory||null;
     this.accepted=true;this.updatePause(false,false);this.hooks.offer(null);this.sendAcceptance();
   }
-  private sendAcceptance(){this.control({type:"accept",selected:this.incomingSelectable?this.incomingSelected:undefined,flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
+  private sendAcceptance(){this.control({type:"accept",selected:this.incomingSelectable?this.incomingSelected:undefined,skip:this.incomingSkip?1:0,skipped:[...this.skippedIds],flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
@@ -426,7 +449,7 @@ export class TransferConnection {
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
     this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
-    this.outgoingSelected=null;
+    this.outgoingSelected=null;this.skippedIds.clear();this.skipRequested=null;this.skippableId=null;
     this.peerPause=false;this.updatePause(false,false);
     try {
       for(let attempt=0;;attempt++){
@@ -437,11 +460,11 @@ export class TransferConnection {
           await this.waitForChannel();
         }
       }
-      this.completed=true;this.hooks.complete("send",this.outgoingOffer?.files.length??files.length);
+      this.completed=true;this.hooks.complete("send",(this.outgoingOffer?.files.length??files.length)-this.skippedIds.size);
     } catch(e) {
       if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
       throw e;
-    } finally {this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;this.updatePause(false,false);}
+    } finally {this.skippableId=null;this.skipRequested=null;this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;this.updatePause(false,false);}
   }
   private async waitForChannel(){
     while(true){
@@ -458,7 +481,7 @@ export class TransferConnection {
       await this.waitForChannel();
       const generation=this.transportGeneration;
       const accept=this.wait<ResumePoint>("accept",600000);
-      this.control({type:"offer",offer,selection:1,flowControl:1,resume:1,pause:1,paused:this.localPaused,integrity:"sha256"});
+      this.control({type:"offer",offer,skip:1,selection:1,flowControl:1,resume:1,pause:1,paused:this.localPaused,integrity:"sha256"});
       const point=await accept;
       this.checkTransport(generation);
       const requested=point?.selected===undefined?offer.files.map(f=>f.id):point.selected;
@@ -469,10 +492,14 @@ export class TransferConnection {
       this.outgoingSelected=selected;this.outgoingOffer={...offer,files:chosen};this.hooks.selection?.(chosen.length);
       const files=chosen.map(f=>sourceFiles[offer.files.findIndex(original=>original.id===f.id)]);
       if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
-      for(const info of chosen.slice(0,point.index))this.hooks.integrity?.(info.id,this.peerIntegrity);
+      const skipped=point.skipped??[];
+      if(!Array.isArray(skipped)||new Set(skipped).size!==skipped.length||skipped.some(id=>!chosen.slice(0,point.index).some(f=>f.id===id)))throw new Error("Retomada de cancelamento inválida.");
+      for(const id of skipped){if(!this.skippedIds.has(id))this.hooks.skipped?.(chosen.find(f=>f.id===id)!.name);this.skippedIds.add(id);}
+      if(this.skipRequested&&this.skippedIds.has(this.skipRequested))this.skipRequested=null;
+      for(const info of chosen.slice(0,point.index))if(!this.skippedIds.has(info.id))this.hooks.integrity?.(info.id,this.peerIntegrity);
       for(let i=point.index;i<files.length;i++) {
         this.sendIndex=i;
-        const file=files[i],info=chosen[i];
+        const file=files[i],info=chosen[i];this.skippableId=info.id;
         this.checkTransport(generation);
         const start=i===point.index?point.offset:0;
         if(this.sendingHash?.index!==i)this.sendingHash={index:i,hash:new SendingIntegrity()};
@@ -483,10 +510,12 @@ export class TransferConnection {
         this.progress(file.name,start,file.size,"send");
         for(let offset=start;offset<file.size;offset+=CHUNK_SIZE) {
           await this.waitIfPaused();this.checkTransport(generation);
+          if(this.skipRequested===info.id)break;
           const chunk=await file.slice(offset,offset+CHUNK_SIZE).arrayBuffer();
           await this.drain();
           await this.waitIfPaused();
           this.checkTransport(generation);
+          if(this.skipRequested===info.id)break;
           if(this.peerIntegrity)hash.update(chunk);
           const current=Math.min(offset+chunk.byteLength,file.size);
           const confirmation=this.peerFlow && (current%FLOW_WINDOW===0 || current===file.size)?this.wait(`flow:${info.id}:${current}`,120000):null;
@@ -495,6 +524,11 @@ export class TransferConnection {
           this.progress(file.name,current,file.size,"send");
         }
         await this.waitIfPaused();this.checkTransport(generation);
+        if(this.skipRequested===info.id){
+          const skipped=this.wait('skip:'+info.id,60000);this.control({type:"file-skip",batch:offer.id,id:info.id});await skipped;this.checkTransport(generation);
+          this.skippedIds.add(info.id);this.hooks.skipped?.(info.name);this.skipRequested=null;this.skippableId=null;this.sendingHash=null;continue;
+        }
+        this.skippableId=null;
         const ack=this.wait<boolean>(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id,sha256:this.peerIntegrity?hash.digest():undefined});
         const verified=await ack;
         if(this.peerIntegrity&&!verified)throw new Error("O outro aparelho não confirmou a integridade do arquivo. Atualize as duas páginas e tente novamente.");
