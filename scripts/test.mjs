@@ -760,3 +760,25 @@ test('conversor gera MIME correto pinta transparencia no JPG e libera bitmap e c
     await assert.rejects(()=>image.convertImage(new File(['heic'],'foto.heic'),{format:'jpeg',quality:.8,maxEdge:800}),/HEIC/);
   }finally{globalThis.createImageBitmap=oldBitmap;globalThis.document=oldDocument;}
 });
+
+const messagesUrl=source('lib/messages.ts');
+const i18n=await import(source('lib/i18n.ts',{'./messages':messagesUrl}));
+const {messages}=await import(messagesUrl);
+
+
+test('idiomas completos preservam parametros e portugues como padrao',()=>{
+  assert.equal(i18n.validLanguage(null),'pt');assert.equal(i18n.validLanguage('fr'),'pt');assert.equal(i18n.validLanguage('es'),'es');
+  assert.ok(Object.keys(messages).length>=390);
+  for(const [pt,translations] of Object.entries(messages))for(const translated of translations){assert.ok(translated.trim());assert.deepEqual([...pt.matchAll(/\{\d+\}/g)].map(m=>m[0]).sort(),[...translated.matchAll(/\{\d+\}/g)].map(m=>m[0]).sort(),pt);}
+  assert.equal(i18n.translate('Enviar arquivos','pt'),'Enviar arquivos');assert.equal(i18n.translate('Enviar arquivos','en'),'Send files');assert.equal(i18n.translate('Send files','es'),'Enviar archivos');
+  assert.equal(i18n.translate(' de ','en'),' of ');
+});
+
+test('mensagens dinamicas de conversao e tempo traduzem sem modificar dados do usuario',()=>{
+  const name='férias {1} <foto>.png';
+  assert.equal(i18n.translate('Convertendo {0} de {1}: {2}','en',[1,2,name]),'Converting 1 of 2: '+name);
+  assert.equal(i18n.translate('Cerca de 3 min restantes','en'),'About 3 min remaining');
+  assert.equal(i18n.translate('About 3 min remaining','es'),'Quedan unos 3 min');
+  assert.equal(i18n.translate('Recuperando a conexão…','es'),'Recuperando la conexión…');
+  assert.equal(i18n.translate(name,'es'),name);assert.equal(i18n.translate('constructor','en'),'constructor');assert.equal(i18n.translate('texto desconhecido','en'),'texto desconhecido');
+});

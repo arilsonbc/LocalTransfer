@@ -13,7 +13,7 @@ for(const [key,translations] of Object.entries(messages)){
   }
 }
 export function translate(text:string,language:Language,values:readonly unknown[]=[]):string{
-  const trimmed=text.trim();let key=messages[text]?text:canonical.get(trimmed),params=values;
+  const trimmed=text.trim();let key=Object.hasOwn(messages,text)?text:canonical.get(trimmed),params=values;
   if(!key){for(const pattern of patterns){const match=pattern.regex.exec(trimmed);if(match){key=pattern.key;const found:string[]=[];pattern.indices.forEach((index,i)=>{found[Number(index)]=match[i+1];});params=found;break;}}}
   if(!key)return text;
   const output=language==="pt"?key:messages[key][language==="en"?0:1];

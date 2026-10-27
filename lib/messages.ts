@@ -1578,5 +1578,13 @@ export const messages:Record<string,readonly [string,string]>={
   "Não foi possível entrar. Confira o código e tente novamente.": [
     "Could not join. Check the code and try again.",
     "No se pudo entrar. Comprueba el código e inténtalo de nuevo."
+  ],
+  "Convertendo…": [
+    "Converting…",
+    "Convirtiendo…"
+  ],
+  "{0} · {1} de {2}": [
+    "{0} · {1} of {2}",
+    "{0} · {1} de {2}"
   ]
 };
