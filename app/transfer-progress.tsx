@@ -5,7 +5,7 @@ import {formatRemaining,type TransferStats} from "../lib/progress";
 export type FileProgress={name:string;current:number;total:number;direction:string;stats?:TransferStats};
 export type PauseState={local:boolean;remote:boolean;supported:boolean};
 const size=(n:number)=>n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:n<1e9?`${(n/1048576).toFixed(1)} MB`:`${(n/1e9).toFixed(1)} GB`;
-export default function TransferProgress({progress,pause,reconnecting,awake,onPause,onCancel,onReconnect}:{progress:FileProgress|null;pause:PauseState;reconnecting:boolean;awake:boolean;onPause:()=>void;onCancel:()=>void;onReconnect:()=>void}){
+export default function TransferProgress({progress,pause,reconnecting,awake,canSkip,onSkip,onPause,onCancel,onReconnect}:{progress:FileProgress|null;pause:PauseState;reconnecting:boolean;awake:boolean;canSkip:boolean;onSkip:()=>void;onPause:()=>void;onCancel:()=>void;onReconnect:()=>void}){
   const paused=pause.local||pause.remote;
   const label=reconnecting?"Recuperando a conexão…":paused?"Transferência pausada":progress?.direction==="receive"?"Recebendo":"Enviando";
   return <section className="progress-card" aria-label="Andamento da transferência">
@@ -15,6 +15,7 @@ export default function TransferProgress({progress,pause,reconnecting,awake,onPa
     {paused&&<p className="pause-explanation" role="status">{pause.local&&pause.remote?"Os dois aparelhos pausaram. Cada um precisa tocar em Continuar para retomar.":pause.local?"Você pausou. Toque em Continuar quando quiser retomar.":"O outro aparelho pausou. Aguarde ele continuar a transferência."}</p>}
     <div className="transfer-actions">
       {progress&&pause.supported&&<button className="secondary" disabled={reconnecting||(!pause.local&&pause.remote)} onClick={onPause}>{pause.local?<Play size={17}/>:<Pause size={17}/>} {pause.local?"Continuar transferência":pause.remote?"Pausado no outro aparelho":"Pausar transferência"}</button>}
+      {progress&&canSkip&&!reconnecting&&<button className="secondary" onClick={onSkip}>Cancelar somente este arquivo</button>}
       <button className="text-button" onClick={onCancel}>Cancelar transferência</button>
     </div>
     <small className="integrity-note"><ShieldCheck size={14}/> A integridade de cada arquivo será conferida antes de concluir, quando os dois aparelhos estiverem atualizados.</small>
