@@ -11,10 +11,11 @@ import {type TransferStats} from "../lib/progress";
 import TransferProgress,{type PauseState} from "./transfer-progress";
 import FileThumbnail from "./file-thumbnail";
 import ReceiveOffer from "./receive-offer";
+import {archiveFiles} from "../lib/archive";
 import {useKeepAwake} from "./use-keep-awake";
 
 type Mode = "choose" | "send" | "receive";
-type Received = FileInfo & { url: string|null;preview:Blob|null };
+type Received = FileInfo & { url: string|null;preview:Blob|null;blob:Blob|null };
 type Progress = { name: string; current: number; total: number; direction: string;stats?:TransferStats };
 const size = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1_000_000_000 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1_000_000_000).toFixed(1)} GB`;
 const prettyCode = (code: string) => `${code.slice(0, 4)} ${code.slice(4)}`;
@@ -34,6 +35,9 @@ export default function GuidedTransfer() {
   const [selectedIds,setSelectedIds]=useState<string[]>([]);
   const offeredId=useRef<string|null>(null);
   const [acceptedCount,setAcceptedCount]=useState(0);
+  const [skipped,setSkipped]=useState<string[]>([]);
+  const [archiving,setArchiving]=useState(false);
+  const [archiveUrl,setArchiveUrl]=useState<string|null>(null);
   const [received, setReceived] = useState<Received[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState("");
@@ -114,8 +118,9 @@ export default function GuidedTransfer() {
     }
     sessionRef.current = s; setSession(s); setPeer(s.peerName || ""); setState("connecting");setDiagnostics(null);setDiagnosticCopied(false);
     const active = () => epoch.current === currentEpoch;
-    setVerified({});setPause({local:false,remote:false,supported:false});
+    setVerified({});setSkipped([]);setPause({local:false,remote:false,supported:false});
     const conn = new TransferConnection(s, {
+      skipped:name=>{if(active())setSkipped(old=>[...old,name]);},
       selection:count=>{if(active())setAcceptedCount(count);},
       pause:(local,remote,supported)=>{if(active())setPause({local,remote,supported});},
       integrity:(id,value)=>{if(active())setVerified(old=>({...old,[id]:value}));},
@@ -124,7 +129,7 @@ export default function GuidedTransfer() {
       peer: value => { if (active()) setPeer(value); },
       offer: incoming => {
         if (!active()) return;
-        if(incoming&&offeredId.current!==incoming.id){setSelectedIds(incoming.files.map(f=>f.id));setError("");}
+        if(incoming&&offeredId.current!==incoming.id){setComplete(false);setSkipped([]);setVerified({});setSelectedIds(incoming.files.map(f=>f.id));setError("");}
         offeredId.current=incoming?.id||null;
         setOffer(incoming);
       },
@@ -133,7 +138,7 @@ export default function GuidedTransfer() {
         if (!active()) return;
         const url = blob?URL.createObjectURL(blob):null;
         if(url && blob){urls.current.push(url);retainedBytes.current+=blob.size;}
-        setReceived(old => [...old, { ...info, name: safeFilename(info.name), url,preview:preview||blob }]);
+        setArchiveUrl(null);setReceived(old => [...old, { ...info, name: safeFilename(info.name), url,blob,preview:preview||blob }]);
       },
       complete: (direction, count) => {
         if (!active()) return;
@@ -200,7 +205,20 @@ export default function GuidedTransfer() {
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   }
 
+  function nextBatch(){
+    setFiles([]);setComplete(false);setProgress(null);setError("");setVerified({});setSkipped([]);setAcceptedCount(0);autoStarted.current=false;
+  }
+
+  async function saveAll(){
+    if(archiving)return;setArchiving(true);setError("");
+    const batch=received.filter(f=>f.blob);
+    try{const zip=await archiveFiles(batch.map(f=>({name:f.name,blob:f.blob!})));const url=URL.createObjectURL(zip);urls.current.push(url);setArchiveUrl(url);}
+    catch(e){setError(e instanceof Error?e.message:"Não foi possível preparar o ZIP.");}
+    finally{setArchiving(false);}
+  }
+
   function clearReceived() {
+    if(archiving)return;setArchiveUrl(null);
     urls.current.forEach(u => URL.revokeObjectURL(u)); urls.current = []; retainedBytes.current = 0; setReceived([]);
   }
 
@@ -258,7 +276,7 @@ export default function GuidedTransfer() {
           <input ref={picker} className="sr-only" type="file" multiple aria-label="Escolher arquivos" onChange={e => { chooseFiles(e.target.files); e.target.value = ""; }} />
           {!files.length ? <section className={`flow-card choose-files ${dragging ? "dragging" : ""}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFiles(e.dataTransfer.files); }}>
             <span className="large-icon"><UploadCloud size={38} strokeWidth={1.5} /></span><h2>Primeiro, escolha os arquivos.</h2><p>Selecione as fotos, vídeos ou documentos<br />{" "}que você quer enviar para o outro aparelho.</p><button className="primary" onClick={() => picker.current?.click()}><Plus size={20} />Selecionar arquivos</button><small>Até 100 GB por vez · Para receber mais de 200 MB, use Chrome ou Edge no computador.</small>
-          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{acceptedCount} de {files.length} arquivo(s) foram aceitos e chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><p className="integrity-badge">{Object.values(verified).filter(Boolean).length===acceptedCount?"Integridade SHA-256 confirmada em todos os arquivos.":"Verificação adicional indisponível. Atualize as duas páginas nos próximos envios."}</p><button className="primary" onClick={() => restart("send")}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
+          </section> : complete ? <section className="flow-card success-card"><span className="success-icon"><CheckCheck size={36} /></span><h2>Arquivos enviados!</h2><p>{acceptedCount} de {files.length} arquivo(s) foram aceitos e chegaram ao outro aparelho.<br />{" "}Confira os arquivos no aparelho que recebeu.</p><p className="integrity-badge">{acceptedCount>0&&Object.values(verified).filter(Boolean).length===acceptedCount?"Integridade SHA-256 confirmada em todos os arquivos.":"Verificação adicional indisponível. Atualize as duas páginas nos próximos envios."}</p><button className="primary" onClick={nextBatch}><Plus size={18} />Enviar outros arquivos</button><button className="text-button" onClick={() => restart()}>Voltar ao início</button></section> : <section className="flow-card code-card">
             {session ? <><span className="card-kicker">{connected ? "APARELHOS CONECTADOS" : "AGORA, NO OUTRO APARELHO"}</span><h2>{state==="reconnecting" ? "Recuperando a conexão…" : connected ? (sending ? (progress ? (pause.local||pause.remote?"Transferência pausada.":"Enviando seus arquivos…") : "Só falta aceitar do outro lado.") : "Pronto para enviar.") : "Escolha Receber e digite este código."}</h2><p>{connected ? <>Conectado com <strong>{peer || "o outro aparelho"}</strong>.</> : "Abra este mesmo site no aparelho que vai receber os arquivos."}</p><div className="code-display" aria-label={`Código para receber: ${session.code}`}>{prettyCode(session.code)}</div><button className="secondary" onClick={() => void copyCode()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? "Código copiado" : "Copiar código"}</button>{!connected && state!=="reconnecting" && <InviteCard code={session.code}/>}<div className={`connection-note ${connected ? "connected" : ""}`} role="status">{connected ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{connected ? (progress ? "Mantenha as duas páginas abertas até terminar." : "O envio começa após a confirmação no outro aparelho.") : state==="reconnecting" ? status : "Aguardando o outro aparelho digitar o código…"}</span></div>{state === "error" && <button className="primary" onClick={() => { disconnect(); void createCode(); }}>Gerar outro código</button>}{connected && !sending && error && <button className="primary" onClick={() => void sendFiles()}>Tentar enviar novamente<ArrowRight size={17} /></button>}<small>O código vale por 20 minutos. Compartilhe apenas com quem vai receber.</small></> : <><span className="large-icon"><LoaderCircle size={33} className={loading ? "spin" : ""} /></span><h2>{loading ? "Preparando seu código…" : "Seus arquivos estão selecionados."}</h2><p>{loading ? "Já vamos mostrar o código para conectar o outro aparelho." : "Toque abaixo para gerar o código de recebimento."}</p>{!loading && <button className="primary" onClick={() => void createCode()}>Gerar código<ArrowRight size={17} /></button>}</>}
             <div className="batch-summary"><FileIcon size={19} /><span><strong>{files.length} arquivo(s) selecionado(s)</strong><small>{size(total)}</small></span>{!connected && !loading && <button className="text-button" onClick={() => picker.current?.click()}>Adicionar mais<Plus size={14} /></button>}</div>
             <details className="file-details"><summary>Ver arquivos selecionados</summary>{files.map((file, i) => <div className="file-line" key={`${file.name}-${i}`}><FileThumbnail file={file} name={file.name}/><span>{file.name}</span><small>{size(file.size)}</small></div>)}</details>
@@ -274,13 +292,14 @@ export default function GuidedTransfer() {
           {(offline||state==="reconnecting")&&<small>Não atualize nem feche as páginas. Uma transferência em andamento pode continuar do ponto confirmado.</small>}
         </section>}
         {transferActive&&<p className="leave-warning" role="note">Transferência em andamento: não feche nem atualize esta página, mesmo durante uma pausa. Ao sair, você poderá precisar começar novamente.</p>}
+        {skipped.length>0&&<div className="skip-summary" role="status"><strong>{skipped.length} arquivo(s) cancelado(s)</strong><ul>{skipped.map((name,i)=><li key={i}>{name}</li>)}</ul><p>Os outros arquivos continuam normalmente. Arquivos cancelados não entram na contagem de recebidos.</p></div>}
         {turnNotice && <div className="turn-notice" role="status"><HelpCircle size={19}/><div><strong>Disponibilidade da retransmissão</strong><p>{turnNotice}</p></div></div>}
         {error && <div className="error-message" role="alert"><HelpCircle size={19} /><span>{error}</span><button aria-label="Fechar aviso" onClick={() => setError("")}><X size={17} /></button></div>}
         {error && diagnostics && <details className="connection-diagnostics"><summary>Diagnóstico da conexão</summary><p>Sem nomes, arquivos, endereços IP ou senhas. Compartilhe estes dados se precisar de ajuda.</p><pre>{JSON.stringify(diagnostics,null,2)}</pre><button className="secondary" onClick={async()=>{try{await navigator.clipboard.writeText(JSON.stringify(diagnostics));setDiagnosticCopied(true);}catch{setDiagnosticCopied(false);}}}>{diagnosticCopied?"Diagnóstico copiado":"Copiar diagnóstico"}</button></details>}
-        {(sending || progress) && <TransferProgress progress={progress} pause={pause} reconnecting={state==="reconnecting"} awake={awake} onPause={()=>connection.current?.setPaused(!pause.local)} onCancel={()=>{connection.current?.cancel();setSending(false);setProgress(null);setError("Transferência cancelada. Você pode tentar novamente.");}} onReconnect={()=>connection.current?.retry()}/>}
+        {(sending || progress) && <TransferProgress progress={progress} pause={pause} reconnecting={state==="reconnecting"} awake={awake} canSkip={!!connection.current?.canSkipFile} onSkip={()=>connection.current?.skipCurrentFile()} onPause={()=>connection.current?.setPaused(!pause.local)} onCancel={()=>{connection.current?.cancel();setSending(false);setProgress(null);setError("Transferência cancelada. Você pode tentar novamente.");}} onReconnect={()=>connection.current?.retry()}/>}
       </section>}
 
-      {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" onClick={clearReceived}>Limpar lista<X size={14} /></button></div><p className="save-warning">{received.some(file=>file.url) ? "Salve os arquivos antes de fechar esta página." : "Os arquivos já foram gravados na pasta escolhida."}</p>{received.map(file => <div className="download-row" key={file.id}><FileThumbnail file={file.preview} name={file.name}/><div><strong>{file.name}</strong><small>{size(file.size)}</small><span className={`integrity-badge ${file.integrity!=="verified"?"integrity-unavailable":""}`}>{file.integrity==="verified"?<><ShieldCheck size={13}/> Integridade verificada</>:"Verificação adicional indisponível"}</span></div>{file.url ? <a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a> : <span className="secondary"><Check size={16} />Salvo na pasta</span>}</div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { restart("receive"); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
+      {!!received.length && <section className="downloads flow-card"><div className="downloads-title"><h2>Arquivos recebidos <span>{received.length}</span></h2><button className="text-button" disabled={archiving||transferActive} onClick={clearReceived}>Limpar lista<X size={14} /></button></div><div className="save-all-actions">{received.some(f=>f.blob)&&(!archiveUrl?<button className="secondary" disabled={archiving||transferActive} onClick={()=>void saveAll()}>{archiving?"Preparando ZIP…":"Salvar todos os arquivos (ZIP)"}</button>:<a className="primary" href={archiveUrl} download="LocalTransfer-arquivos.zip">Baixar ZIP com todos os arquivos</a>)}<small>O ZIP reúne os arquivos disponíveis nesta página. Arquivos já gravados na pasta não precisam ser baixados novamente.</small></div><p className="save-warning">{received.some(file=>file.url) ? "Salve os arquivos antes de fechar esta página." : "Os arquivos já foram gravados na pasta escolhida."}</p>{received.map(file => <div className="download-row" key={file.id}><FileThumbnail file={file.preview} name={file.name}/><div><strong>{file.name}</strong><small>{size(file.size)}</small><span className={`integrity-badge ${file.integrity!=="verified"?"integrity-unavailable":""}`}>{file.integrity==="verified"?<><ShieldCheck size={13}/> Integridade verificada</>:"Verificação adicional indisponível"}</span></div>{file.url ? <a className="secondary" href={file.url} download={file.name}><ArrowDownToLine size={16} />Salvar</a> : <span className="secondary"><Check size={16} />Salvo na pasta</span>}</div>)}<p className="iphone-note">No iPhone, o arquivo pode abrir em outra tela. Use o botão de compartilhar e escolha “Salvar em Arquivos” ou “Salvar Imagem”.</p>{complete && <button className="primary" onClick={() => { setComplete(false);setProgress(null);setError(""); }}>Receber outros arquivos<ArrowRight size={16} /></button>}</section>}
 
 
       <div className="reassurance"><ShieldCheck size={16} /><span>Sem login. Sem instalar aplicativos. Seus arquivos não ficam no servidor.</span></div>
