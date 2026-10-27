@@ -1,3 +1,4 @@
+import {BatchSummaryTracker,type BatchSummary,type BatchOutcome} from "./transfer-summary";
 import {ProgressMeter,type TransferStats} from "./progress";
 import {newSha256,digestHex,SendingIntegrity} from "./integrity";
 export const MAX_BATCH = 100_000_000_000;
@@ -18,6 +19,7 @@ type Hooks = {
   integrity?:(id:string,verified:boolean)=>void;
   selection?:(count:number)=>void;
   skipped?:(name:string)=>void;
+  summary?:(summary:BatchSummary|null)=>void;
   state:(state:string,message:string)=>void;
   peer:(name:string)=>void;
   offer:(offer:Offer|null)=>void;
@@ -91,6 +93,10 @@ export class TransferConnection {
   private polling=false;
   private recovering=false;
   private completed=false;
+  private batchSummary:BatchSummaryTracker|null=null;
+  private summaryFinished=false;
+  private beginSummary(direction:"send"|"receive",offer:Offer){this.batchSummary=new BatchSummaryTracker(direction,offer.files);this.summaryFinished=false;this.hooks.summary?.(null);}
+  private finishSummary(outcome:BatchOutcome){if(this.batchSummary&&!this.summaryFinished){this.summaryFinished=true;this.hooks.summary?.(this.batchSummary.finish(outcome));}}
   private peerSkip=false;
   private incomingSkip=false;
   private skippedIds=new Set<string>();
@@ -301,7 +307,7 @@ export class TransferConnection {
       const bytes=typeof event.data==="string"?event.data.length*2:event.data instanceof Blob?event.data.size:event.data.byteLength;
       this.queuedBytes+=bytes;
       if(this.queuedBytes>4*FLOW_WINDOW){this.fail("O envio excedeu a velocidade de gravação. Tente novamente.");return;}
-      this.queue=this.queue.then(()=>{if(!this.stopped && this.channel===channel)return this.message(event.data);}).catch(e=>{if(e instanceof TransportInterrupted)return;this.cancel();this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");}).finally(()=>{this.queuedBytes-=bytes;});
+      this.queue=this.queue.then(()=>{if(!this.stopped && this.channel===channel)return this.message(event.data);}).catch(e=>{if(e instanceof TransportInterrupted)return;this.cancel("failed");this.hooks.error(e instanceof Error?e.message:"Dados inválidos recebidos.");}).finally(()=>{this.queuedBytes-=bytes;});
     };
   }
   private control(value:unknown) {
@@ -350,7 +356,7 @@ export class TransferConnection {
           return;
         }
         if(this.busy){this.control({type:"reject",reason:"O aparelho está ocupado."});return;}
-        this.skippedIds.clear();this.skipRequested=null;this.incomingSkip=msg.skip===1;this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
+        this.beginSummary("receive",msg.offer);this.skippedIds.clear();this.skipRequested=null;this.incomingSkip=msg.skip===1;this.incoming=msg.offer;this.incomingFlow=msg.flowControl===1;this.incomingResume=msg.resume===1 && this.incomingFlow;this.incomingIntegrity=msg.integrity==="sha256";this.accepted=false;this.receiveIndex=0;this.meter.reset();this.completed=false;
         this.incomingPause=msg.pause===1;this.updatePause(false,false);
         this.incomingSelectable=msg.selection===1;this.incomingSelected=null;this.showOffer();return;
       }
@@ -362,12 +368,12 @@ export class TransferConnection {
         if(!this.incomingSkip||!this.accepted||msg.batch!==this.incoming?.id)throw new Error("Cancelamento de arquivo inválido.");
         if(this.skippedIds.has(msg.id)){this.control({type:"skip-ack",id:msg.id});return;}
         if(!info||msg.id!==info.id)throw new Error("Sequência de cancelamento inválida.");
-        await this.receiving?.sink?.abort();this.receiving=null;this.skippedIds.add(info.id);this.receiveIndex++;this.hooks.skipped?.(info.name);
+        await this.receiving?.sink?.abort();this.receiving=null;this.skippedIds.add(info.id);this.batchSummary?.skip(info.id);this.receiveIndex++;this.hooks.skipped?.(info.name);
         this.control({type:"skip-ack",id:info.id});return;
       }
       case "skip-ack": this.resolve('skip:'+msg.id);return;
       case "pause": if(this.busy&&this.pauseSupported&&msg.id===(this.outgoingOffer||this.incoming)?.id&&typeof msg.paused==="boolean")this.updatePause(undefined,msg.paused);return;
-      case "reject": this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
+      case "reject": this.finishSummary("rejected");this.rejectAll(typeof msg.reason==="string"?msg.reason:"O recebimento foi recusado.");return;
       case "file": {
         const info=this.receivedFiles()[this.receiveIndex];
         if(!this.accepted || !info || msg.id!==info.id)throw new Error("Sequência de arquivos inválida.");
@@ -389,6 +395,7 @@ export class TransferConnection {
         // A failed preview must never turn a successfully verified file into a failed transfer.
         const preview=r.sink?.preview?await r.sink.preview().catch(()=>null):null;
         if(this.receiving!==r)return;
+        this.batchSummary?.confirm(r.info.id);
         this.hooks.file({...r.info,integrity:this.incomingIntegrity?"verified":"unavailable"},r.sink?null:new Blob(r.chunks,{type:r.info.type||"application/octet-stream"}),preview);
         this.receiving=null;this.receiveIndex++;this.control({type:"ack",id:msg.id,integrity:this.incomingIntegrity?"sha256":undefined});return;
       }
@@ -406,11 +413,11 @@ export class TransferConnection {
           if(msg.id!==this.incoming.id)throw new Error("Confirmação de lote inválida.");
           this.completedOffer=this.incoming;this.completedAt=Date.now();
         }else this.completed=true;
-        this.incoming=null;this.accepted=false;this.sinkFactory=null;this.updatePause(false,false);this.hooks.offer(null);this.hooks.complete("receive",count);
+        this.incoming=null;this.accepted=false;this.sinkFactory=null;this.updatePause(false,false);this.hooks.offer(null);this.finishSummary("completed");this.hooks.complete("receive",count);
         if(acknowledge)this.control({type:"done-ack",id:completedId});
         return;
       }
-      case "cancel": this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
+      case "cancel": this.finishSummary(msg.reason==="failed"?"failed":"cancelled");this.resetTransfer();this.hooks.error("Transferência cancelada pelo outro aparelho.");return;
     }
   }
   accept(sinkFactory?:SinkFactory,offerId?:string,selectedIds?:string[]) {
@@ -424,11 +431,13 @@ export class TransferConnection {
       const message=!sinkFactory?"Para receber mais de 200 MB, escolha uma pasta usando Chrome ou Edge no computador.":"Atualize o site no aparelho que envia para transferir arquivos grandes.";
       this.reject();this.hooks.error(message);return;
     }
+    this.batchSummary?.select(this.incomingSelected!);
     this.sinkFactory=sinkFactory||null;
     this.accepted=true;this.updatePause(false,false);this.hooks.offer(null);this.sendAcceptance();
   }
   private sendAcceptance(){this.control({type:"accept",selected:this.incomingSelectable?this.incomingSelected:undefined,skip:this.incomingSkip?1:0,skipped:[...this.skippedIds],flowControl:this.incomingFlow?1:0,resume:this.incomingResume?1:0,pause:this.incomingPause?1:0,paused:this.localPaused,integrity:this.incomingIntegrity?"sha256":undefined,index:this.receiveIndex,offset:this.receiving?.bytes||0});}
   reject() {
+    this.finishSummary("rejected");
     this.incoming=null;this.accepted=false;this.hooks.offer(null);this.control({type:"reject",reason:"O recebimento foi recusado."});
   }
   private async drain() {
@@ -448,7 +457,7 @@ export class TransferConnection {
     if(this.busy)throw new Error("Aguarde a transferência atual terminar.");
     const offer:Offer={id:crypto.randomUUID(),files:files.map(f=>({id:crypto.randomUUID(),name:f.name,size:f.size,type:f.type||"application/octet-stream"}))};
     if(!validateOffer(offer))throw new Error("Selecione até 500 arquivos e 100 GB por lote.");
-    this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
+    this.beginSummary("send",offer);this.outgoing=true;this.cancelled=false;this.completed=false;this.peerFlow=false;this.outgoingOffer=offer;this.meter.reset();
     this.outgoingSelected=null;this.skippedIds.clear();this.skipRequested=null;this.skippableId=null;
     this.peerPause=false;this.updatePause(false,false);
     try {
@@ -460,9 +469,10 @@ export class TransferConnection {
           await this.waitForChannel();
         }
       }
-      this.completed=true;this.hooks.complete("send",(this.outgoingOffer?.files.length??files.length)-this.skippedIds.size);
+      this.completed=true;this.finishSummary("completed");this.hooks.complete("send",(this.outgoingOffer?.files.length??files.length)-this.skippedIds.size);
     } catch(e) {
-      if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});
+      this.finishSummary(this.cancelled?"cancelled":"failed");
+      if(!this.stopped && !this.recovering && this.channel?.readyState==="open")this.control({type:"cancel",reason:this.cancelled?"cancelled":"failed"});
       throw e;
     } finally {this.skippableId=null;this.skipRequested=null;this.outgoing=false;this.outgoingOffer=null;this.sendingHash=null;this.updatePause(false,false);}
   }
@@ -489,14 +499,14 @@ export class TransferConnection {
       const chosen=offer.files.filter(f=>requested.includes(f.id));
       const selected=chosen.map(f=>f.id);
       if(this.outgoingSelected&&JSON.stringify(this.outgoingSelected)!==JSON.stringify(selected))throw new Error("A seleção mudou durante a retomada. Crie outra sala.");
-      this.outgoingSelected=selected;this.outgoingOffer={...offer,files:chosen};this.hooks.selection?.(chosen.length);
+      this.outgoingSelected=selected;this.batchSummary?.select(selected);this.outgoingOffer={...offer,files:chosen};this.hooks.selection?.(chosen.length);
       const files=chosen.map(f=>sourceFiles[offer.files.findIndex(original=>original.id===f.id)]);
       if(!point || !Number.isSafeInteger(point.index) || point.index<0 || point.index>files.length || !Number.isSafeInteger(point.offset) || point.offset<0 || point.offset>(files[point.index]?.size||0))throw new Error("O outro aparelho informou um ponto de retomada inválido.");
       const skipped=point.skipped??[];
       if(!Array.isArray(skipped)||new Set(skipped).size!==skipped.length||skipped.some(id=>!chosen.slice(0,point.index).some(f=>f.id===id)))throw new Error("Retomada de cancelamento inválida.");
-      for(const id of skipped){if(!this.skippedIds.has(id))this.hooks.skipped?.(chosen.find(f=>f.id===id)!.name);this.skippedIds.add(id);}
+      for(const id of skipped){this.batchSummary?.skip(id);if(!this.skippedIds.has(id))this.hooks.skipped?.(chosen.find(f=>f.id===id)!.name);this.skippedIds.add(id);}
       if(this.skipRequested&&this.skippedIds.has(this.skipRequested))this.skipRequested=null;
-      for(const info of chosen.slice(0,point.index))if(!this.skippedIds.has(info.id))this.hooks.integrity?.(info.id,this.peerIntegrity);
+      for(const info of chosen.slice(0,point.index))if(!this.skippedIds.has(info.id)){this.batchSummary?.confirm(info.id);this.hooks.integrity?.(info.id,this.peerIntegrity);}
       for(let i=point.index;i<files.length;i++) {
         this.sendIndex=i;
         const file=files[i],info=chosen[i];this.skippableId=info.id;
@@ -526,13 +536,13 @@ export class TransferConnection {
         await this.waitIfPaused();this.checkTransport(generation);
         if(this.skipRequested===info.id){
           const skipped=this.wait('skip:'+info.id,60000);this.control({type:"file-skip",batch:offer.id,id:info.id});await skipped;this.checkTransport(generation);
-          this.skippedIds.add(info.id);this.hooks.skipped?.(info.name);this.skipRequested=null;this.skippableId=null;this.sendingHash=null;continue;
+          this.skippedIds.add(info.id);this.batchSummary?.skip(info.id);this.hooks.skipped?.(info.name);this.skipRequested=null;this.skippableId=null;this.sendingHash=null;continue;
         }
         this.skippableId=null;
         const ack=this.wait<boolean>(`ack:${info.id}`,60000);this.control({type:"file-end",id:info.id,sha256:this.peerIntegrity?hash.digest():undefined});
         const verified=await ack;
         if(this.peerIntegrity&&!verified)throw new Error("O outro aparelho não confirmou a integridade do arquivo. Atualize as duas páginas e tente novamente.");
-        this.hooks.integrity?.(info.id,this.peerIntegrity&&verified);
+        this.batchSummary?.confirm(info.id);this.hooks.integrity?.(info.id,this.peerIntegrity&&verified);
       }
       await this.waitIfPaused();this.checkTransport(generation);
       const done=this.peerResume?this.wait("done",60000):null;
@@ -540,13 +550,14 @@ export class TransferConnection {
       if(done){await done;this.checkTransport(generation);this.control({type:"done-confirm",id:offer.id});}
   }
   private resetTransfer() {
+    this.finishSummary("cancelled");
     this.latestProgress=null;
     this.updatePause(false,false);
     this.transferEpoch++;
     this.cancelled=true;void this.receiving?.sink?.abort().catch(()=>{});this.receiving=null;this.incoming=null;this.accepted=false;this.sinkFactory=null;this.hooks.offer(null);this.rejectAll("Transferência cancelada.");
   }
-  cancel() {if(!this.recovering && this.channel?.readyState==="open")this.control({type:"cancel"});this.resetTransfer();}
-  private fail(message:string) {if(this.stopped)return;this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
+  cancel(reason:"cancelled"|"failed"="cancelled") {this.finishSummary(reason);if(!this.recovering && this.channel?.readyState==="open")this.control({type:"cancel",reason});this.resetTransfer();}
+  private fail(message:string) {if(this.stopped)return;this.finishSummary("failed");this.failureDiagnostics=this.diagnostics;this.close();this.hooks.state("error",message);this.hooks.error(message);}
   close() {
     this.stopped=true;
     if(this.retryTimer)clearTimeout(this.retryTimer);
