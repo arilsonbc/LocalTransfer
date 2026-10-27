@@ -600,3 +600,16 @@ test('ZIP local preserva nomes UTF-8, bytes, CRC e entradas vazias sem sobrescre
   await assert.rejects(()=>archiveFiles([]),/200 MB/);
   await assert.rejects(()=>archiveFiles([{name:'grande',blob:{size:200*1024*1024+1}}]),/200 MB/);
 });
+
+
+test('varios lotes na mesma conexao exigem novo aceite e preservam arquivos anteriores',async()=>{
+  const p=pair();let offers=0;
+  p.right.hooks.offer=offer=>{if(offer){offers++;queueMicrotask(()=>p.right.accept(undefined,offer.id));}};
+  const channel=p.left.channel;
+  try{
+    await p.left.send([new File(['primeiro'],'primeiro.txt')]);
+    await p.left.send([new File(['segundo'],'segundo.txt')]);
+    assert.equal(offers,2);assert.equal(p.left.channel,channel);
+    assert.deepEqual(p.blobs.map(f=>f.info.name),['primeiro.txt','segundo.txt']);assert.equal(p.completions.length,4);assert.deepEqual(p.errors,[]);
+  }finally{p.left.close();p.right.close();}
+});
