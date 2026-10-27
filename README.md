@@ -125,3 +125,10 @@ Cancelar somente este arquivo funciona no remetente e no destinatário atualizad
 
 Cada lote mostra um resumo local ao concluir, recusar, cancelar ou falhar: enviados (confirmados pelo destino), recebidos neste aparelho, recusados na seleção ou no aceite, cancelados, falhas/não concluídos, tamanho oferecido e tamanho concluído. Enviados e recebidos são contagens deste aparelho, não a soma dos dois lados. A duração começa na proposta do lote e inclui aceite, pausas e reconexões. Blocos parciais e tráfego de retransmissão não entram no tamanho concluído. O resumo não é salvo em servidor e é substituído no próximo lote. Após uma falha, o remetente pode ter menos confirmações do que os arquivos efetivamente concluídos no destinatário; confira os dois resumos.
 
+
+### Conversor de imagens
+
+Abra /converter pelo menu Imagens ou pelo atalho na página inicial. Escolha JPG, PNG ou WebP, qualidade e maior lado da saída. A conversão usa ImageBitmap e canvas localmente, sem upload. As dimensões preservam a proporção e nunca ampliam o original. JPG preenche transparência com branco; PNG/WebP podem preservá-la. PNG ignora a qualidade; reduzir dimensões ajuda a diminuir o tamanho. A saída é estática, não preserva EXIF original e pode ficar maior que o arquivo de entrada, o que é informado na tela.
+
+Limites: 20 fotos, 20 MB por arquivo, 100 MB de entrada e de resultados, 40 megapixels por imagem e maior lado de saída de até 4096 px. JPEG, PNG, WebP, AVIF, HEIC e HEIF só são decodificados se o navegador permitir. HEIC/HEIF pode falhar mesmo em aparelho atualizado; a mensagem orienta exportar JPG. Há prévia, download individual e ZIP dos resultados concluídos. Falha em uma conversão não impede as seguintes. Parar cancela a fila e descarta o resultado que ainda não terminou. Trocar fotos ou limpar libera as URLs locais; originais não são modificados.
+
