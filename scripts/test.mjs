@@ -716,3 +716,10 @@ test('recusa integral gera resumo em ambos os aparelhos sem erro contado como fa
   const p=pair(false);const reports=[];p.left.hooks.summary=value=>{if(value)reports.push(value);};p.right.hooks.summary=value=>{if(value)reports.push(value);};
   try{await assert.rejects(()=>p.left.send([new File(['a'],'a')]),/recusado/);assert.equal(reports.length,2);assert.ok(reports.every(r=>r.refused===1&&r.failed===0&&r.completedBytes===0));}finally{p.left.close();p.right.close();}
 });
+
+
+test('falha real de gravacao preserva resumo de falha nos dois lados sem falso sucesso',async()=>{
+  const p=pair(true,async()=>({async write(){throw new Error('disco indisponivel');},async close(){},async abort(){}}));
+  const reports=[];p.left.hooks.summary=value=>{if(value)reports.push(value);};p.right.hooks.summary=value=>{if(value)reports.push(value);};
+  try{await assert.rejects(()=>p.left.send([new File([Buffer.alloc(transfer.FLOW_WINDOW)],'falha.bin')]));assert.equal(reports.length,2);assert.ok(reports.every(r=>r.outcome==='failed'&&r.failed===1&&r.completedBytes===0&&r.cancelled===0));assert.equal(p.blobs.length,0);}finally{p.left.close();p.right.close();}
+});
