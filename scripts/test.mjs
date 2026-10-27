@@ -656,3 +656,20 @@ test('arquivo cancelado exige lote autorizado e navegador antigo nao exibe cance
     assert.equal(p.right.receiveIndex,0);
   }finally{p.left.close();p.right.close();}
 });
+
+
+test('novo lote apos reconexao nao herda cancelamentos e recusa nao encerra a conexao',async()=>{
+  const p=pair();let requested=false;
+  p.right.hooks.progress=(name,bytes)=>{if(name==='cancelado'&&bytes>=65536&&!requested){requested=true;p.left.skipCurrentFile();}};
+  try{
+    await p.left.send([new File([Buffer.alloc(transfer.FLOW_WINDOW)],'cancelado')]);
+    reconnectTransport(p);await until(()=>!p.left.recovering&&!p.right.recovering);
+    p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.reject());};
+    await assert.rejects(()=>p.left.send([new File(['nao'],'recusado')]),/recusado/);
+    await until(()=>!p.right.busy);
+    p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id));};
+    await p.left.send([new File(['ok'],'novo.txt')]);
+    assert.deepEqual(p.blobs.map(f=>f.info.name),['novo.txt']);assert.equal(await p.blobs[0].blob.text(),'ok');
+    assert.equal(p.completions.at(-1).count,1);
+  }finally{p.left.close();p.right.close();}
+});
