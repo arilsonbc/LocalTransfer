@@ -15,7 +15,9 @@ const service=await import(serviceUrl);
 const progressUrl=source('lib/progress.ts');
 const integrityUrl=source('lib/integrity.ts',{'@noble/hashes/sha2.js':import.meta.resolve('@noble/hashes/sha2.js')});
 const integrity=await import(integrityUrl);
-const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl});
+const summaryUrl=source('lib/transfer-summary.ts');
+const summary=await import(summaryUrl);
+const transferUrl=source('lib/transfer.ts',{'./progress':progressUrl,'./integrity':integrityUrl,'./transfer-summary':summaryUrl});
 const transfer=await import(transferUrl);
 const photoUrl=source('lib/photo-preview.ts');
 const photo=await import(photoUrl);
@@ -672,4 +674,24 @@ test('novo lote apos reconexao nao herda cancelamentos e recusa nao encerra a co
     assert.deepEqual(p.blobs.map(f=>f.info.name),['novo.txt']);assert.equal(await p.blobs[0].blob.text(),'ok');
     assert.equal(p.completions.at(-1).count,1);
   }finally{p.left.close();p.right.close();}
+});
+
+
+test('resumo separa recusados cancelados e confirmados e calcula bytes e tempo sem duplicar',()=>{
+  const t=new summary.BatchSummaryTracker('send',[{id:'a',size:10},{id:'b',size:20},{id:'c',size:30}],1000);
+  t.select(['a','c']);t.confirm('a');t.confirm('a');t.skip('c');t.skip('c');
+  const result=t.finish('completed',61500);
+  assert.deepEqual(result,{direction:'send',outcome:'completed',offered:3,sent:1,received:0,refused:1,cancelled:1,failed:0,totalBytes:60,completedBytes:10,durationMs:60500});
+  assert.equal(t.finish('failed',90000),result);assert.equal(summary.formatDuration(result.durationMs),'1 min 0 s');
+  assert.equal(summary.formatDuration(0),'0 s');assert.equal(summary.formatDuration(3661000),'1 h 1 min');
+});
+
+test('resumo de falha preserva os arquivos concluidos e recusa integral nao vira falha',()=>{
+  const files=[{id:'a',size:0},{id:'b',size:15}];
+  const failed=new summary.BatchSummaryTracker('receive',files,0);failed.confirm('a');
+  const result=failed.finish('failed',2000);assert.equal(result.received,1);assert.equal(result.failed,1);assert.equal(result.completedBytes,0);
+  const rejected=new summary.BatchSummaryTracker('receive',files,0).finish('rejected',3000);
+  assert.equal(rejected.refused,2);assert.equal(rejected.failed,0);assert.equal(rejected.cancelled,0);
+  const cancelled=new summary.BatchSummaryTracker('send',files,0).finish('cancelled',5000);
+  assert.equal(cancelled.cancelled,2);assert.equal(cancelled.failed,0);
 });
