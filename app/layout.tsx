@@ -1,3 +1,4 @@
+import LanguageProvider from "./language-provider";
 import type { Metadata } from "next";
 import "./globals.css";
 
@@ -18,7 +19,7 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" suppressHydrationWarning>
       <head><script id="localtransfer-theme" dangerouslySetInnerHTML={{__html:`try{var t=localStorage.getItem('localtransfer-theme');document.documentElement.dataset.theme=t==='light'||t==='dark'?t:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'}catch(e){document.documentElement.dataset.theme='light'}`}}/></head>
-      <body className="antialiased">{children}</body>
+      <body className="antialiased"><LanguageProvider>{children}</LanguageProvider></body>
     </html>
   );
 }
