@@ -695,3 +695,24 @@ test('resumo de falha preserva os arquivos concluidos e recusa integral nao vira
   const cancelled=new summary.BatchSummaryTracker('send',files,0).finish('cancelled',5000);
   assert.equal(cancelled.cancelled,2);assert.equal(cancelled.failed,0);
 });
+
+
+test('resumos do transporte isolam lotes e mantem recusa parcial com cancelamento individual',async()=>{
+  const p=pair();const sent=[],received=[];let cancelled=false;
+  p.left.hooks.summary=value=>{if(value)sent.push(value);};p.right.hooks.summary=value=>{if(value)received.push(value);};
+  p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept(undefined,offer.id,offer.files.slice(1).map(f=>f.id)));};
+  p.right.hooks.progress=(name,bytes)=>{if(name==='pular'&&bytes>=65536&&!cancelled){cancelled=true;p.left.skipCurrentFile();}};
+  try{
+    await p.left.send([new File(['nao'],'recusado'),new File([Buffer.alloc(2*transfer.FLOW_WINDOW)],'pular'),new File(['sim'],'aceito')]);
+    assert.equal(sent.length,1);assert.equal(received.length,1);
+    for(const report of [...sent,...received]){assert.equal(report.refused,1);assert.equal(report.cancelled,1);assert.equal(report.failed,0);assert.equal(report.completedBytes,3);assert.equal(report.totalBytes,2*transfer.FLOW_WINDOW+6);}
+    assert.equal(sent[0].sent,1);assert.equal(received[0].received,1);
+    p.right.hooks.offer=offer=>{if(offer)queueMicrotask(()=>p.right.accept());};
+    await p.left.send([new File(['novo'],'segundo')]);assert.equal(sent.length,2);assert.equal(sent[1].sent,1);assert.equal(sent[1].cancelled,0);assert.equal(sent[1].completedBytes,4);
+  }finally{p.left.close();p.right.close();}
+});
+
+test('recusa integral gera resumo em ambos os aparelhos sem erro contado como falha',async()=>{
+  const p=pair(false);const reports=[];p.left.hooks.summary=value=>{if(value)reports.push(value);};p.right.hooks.summary=value=>{if(value)reports.push(value);};
+  try{await assert.rejects(()=>p.left.send([new File(['a'],'a')]),/recusado/);assert.equal(reports.length,2);assert.ok(reports.every(r=>r.refused===1&&r.failed===0&&r.completedBytes===0));}finally{p.left.close();p.right.close();}
+});
