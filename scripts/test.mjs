@@ -740,3 +740,23 @@ test('conversor preserva proporcao nao amplia e limita dimensoes e entradas',asy
   image.validateImage({name:'FOTO.HEIC',size:100});
   assert.equal(image.imageOutputName('../foto.png','webp'),'__foto-convertida.webp');
 });
+
+
+test('conversor gera MIME correto pinta transparencia no JPG e libera bitmap e canvas',async()=>{
+  const image=await import(source('lib/image-converter.ts'));
+  const oldBitmap=globalThis.createImageBitmap,oldDocument=globalThis.document;let closed=0,painted=0;const canvases=[];
+  globalThis.createImageBitmap=async()=>({width:1600,height:1000,close(){closed++;}});
+  globalThis.document={createElement(){const canvas={width:0,height:0,getContext(){return {fillStyle:'',fillRect(){painted++;},drawImage(){}};},toBlob(callback,mime){callback(new Blob(['pixels'],{type:mime}));}};canvases.push(canvas);return canvas;}};
+  try{
+    const file=new File(['source'],'foto.png',{type:'image/png'});
+    for(const format of ['jpeg','png','webp']){
+      const result=await image.convertImage(file,{format,quality:.8,maxEdge:800});
+      assert.equal(result.blob.type,'image/'+format);assert.equal(result.width,800);assert.equal(result.height,500);
+    }
+    assert.equal(painted,1);assert.equal(closed,3);assert.ok(canvases.every(c=>c.width===1&&c.height===1));
+    globalThis.document={createElement(){return {width:0,height:0,getContext(){return {drawImage(){}};},toBlob(callback){callback(new Blob(['fallback'],{type:'image/png'}));}};}};
+    await assert.rejects(()=>image.convertImage(file,{format:'webp',quality:.8,maxEdge:800}),/formato escolhido/);assert.equal(closed,4);
+    globalThis.createImageBitmap=async()=>{throw new Error('unsupported');};
+    await assert.rejects(()=>image.convertImage(new File(['heic'],'foto.heic'),{format:'jpeg',quality:.8,maxEdge:800}),/HEIC/);
+  }finally{globalThis.createImageBitmap=oldBitmap;globalThis.document=oldDocument;}
+});
