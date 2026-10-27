@@ -111,3 +111,12 @@ Durante uma transferência, inclusive pausada, o site pede confirmação ao volt
 
 O estado da conexão informa espera, preparação, reconexão, indisponibilidade e falta de internet detectada pelo navegador. A indicação de internet é uma pista local, não um teste de acesso ao outro aparelho. Na reconexão, mantenha as páginas abertas para preservar o progresso confirmado.
 
+
+### Lotes na mesma conexão, ZIP e cancelamento individual
+
+Após concluir, use Enviar outros arquivos para selecionar outro lote sem trocar o código. Quem recebe precisa aceitar cada novo lote. Mantenha as páginas abertas; os arquivos anteriores continuam disponíveis e contam no limite de memória de 200 MB até limpar a lista.
+
+Salvar todos os arquivos (ZIP) prepara um arquivo ZIP local, sem compressão e sem enviar os dados a um servidor. Depois toque em Baixar ZIP. Ele inclui apenas os arquivos disponíveis na página, até 200 MB; arquivos já gravados diretamente na pasta não são incluídos. Os nomes são numerados para evitar colisões. No iPhone, pode ser necessário usar Compartilhar e Salvar em Arquivos.
+
+Cancelar somente este arquivo funciona no remetente e no destinatário atualizados, durante o arquivo atual. O parcial é descartado (ou a gravação é abortada), os demais continuam e a contagem final exclui cancelados. Se a transferência estiver pausada, continue para enviar os próximos. O cancelamento precisa chegar ao outro aparelho antes da finalização; um arquivo já concluído não é apagado. Cancelar transferência continua encerrando o lote todo.
+
