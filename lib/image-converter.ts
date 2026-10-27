@@ -20,7 +20,7 @@ export async function convertImage(file:File,options:ImageOptions){
   if(!Object.hasOwn(formats,options.format)||!Number.isFinite(options.quality)||options.quality<0.1||options.quality>1)throw new Error("Configuração de conversão inválida.");
   let bitmap:ImageBitmap;
   try{bitmap=await createImageBitmap(file,{imageOrientation:"from-image"});}
-  catch{throw new Error("O navegador não conseguiu abrir esta foto. Para HEIC/HEIF, tente Safari ou exporte a foto como JPG no celular.");}
+  catch{throw new Error(/\.(heic|heif)$/i.test(file.name)?"O navegador não conseguiu abrir esta foto HEIC/HEIF. Tente Safari ou exporte a foto como JPG no celular.":"Não foi possível abrir esta imagem. O arquivo pode estar danificado ou ter um formato não suportado pelo navegador.");}
   const canvas=document.createElement("canvas");
   try{
     const dimensions=imageDimensions(bitmap.width,bitmap.height,options.maxEdge);canvas.width=dimensions.width;canvas.height=dimensions.height;
