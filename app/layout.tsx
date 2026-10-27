@@ -3,7 +3,6 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LocalTransfer — seus arquivos, de um aparelho para outro",
   description: "Envie fotos e arquivos entre iPhone, Android e computador direto pelo navegador. Sem instalar aplicativos.",
   icons: {
     icon: "/favicon.svg",
