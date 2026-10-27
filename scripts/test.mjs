@@ -782,3 +782,12 @@ test('mensagens dinamicas de conversao e tempo traduzem sem modificar dados do u
   assert.equal(i18n.translate('Recuperando a conexão…','es'),'Recuperando la conexión…');
   assert.equal(i18n.translate(name,'es'),name);assert.equal(i18n.translate('constructor','en'),'constructor');assert.equal(i18n.translate('texto desconhecido','en'),'texto desconhecido');
 });
+
+
+test('todos os textos usados pelo tradutor da interface possuem ingles e espanhol',()=>{
+  const files=['guided-transfer.tsx','top-bar.tsx','theme-switch.tsx','invite-card.tsx','receive-offer.tsx','transfer-progress.tsx','transfer-summary.tsx','file-thumbnail.tsx','converter/image-converter.tsx'];let count=0;
+  for(const file of files){const text=readFileSync(new URL('../app/'+file,import.meta.url),'utf8');const ast=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+    function visit(n){if(ts.isCallExpression(n)&&ts.isIdentifier(n.expression)&&n.expression.text==='t'&&ts.isStringLiteral(n.arguments[0])){count++;assert.ok(Object.hasOwn(messages,n.arguments[0].text.trim()),file+': '+n.arguments[0].text);}ts.forEachChild(n,visit);}visit(ast);
+  }
+  assert.ok(count>250);
+});
