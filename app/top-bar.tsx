@@ -5,6 +5,7 @@ import {ArrowLeftRight,ExternalLink,CodeXml,HelpCircle,Mail,X} from "lucide-reac
 import ThemeSwitch from "./theme-switch";
 
 const questions=[
+  ["Como converto ou reduzo minhas fotos?","Abra Imagens no menu, selecione as fotos e escolha JPG, PNG ou WebP. Ajuste a qualidade e o maior lado, depois toque em Converter imagens. Baixe cada resultado ou prepare um ZIP. Tudo é processado no navegador; as fotos não vão ao servidor. Em JPG, a transparência vira branco. PNG não usa o ajuste de qualidade e HEIC/HEIF depende do navegador."],
   ["Como envio meus arquivos?","No aparelho com os arquivos, escolha Enviar arquivos e selecione o que deseja enviar. No outro aparelho, use o link de convite, leia o QR Code com a câmera ou escolha Receber arquivos e digite o código. Confirme o recebimento para começar."],
   ["Preciso instalar algum aplicativo ou criar uma conta?","Não. Abra o site no navegador dos dois aparelhos. Funciona no computador, Android e iPhone, sem instalação ou login."],
   ["Os aparelhos precisam estar no mesmo Wi-Fi?","Não. Você pode usar Wi-Fi ou rede móvel, inclusive 4G e 5G. Quando a conexão direta não é possível, o serviço TURN da Cloudflare ajuda a conectar os aparelhos."],
