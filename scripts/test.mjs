@@ -586,3 +586,17 @@ test('falha de gravação cancela envio e aborta o arquivo parcial',async()=>{
     assert.ok(p.errors.some(e=>e.includes('Disco cheio')));
   } finally {p.left.close();p.right.close();}
 });
+
+
+test('ZIP local preserva nomes UTF-8, bytes, CRC e entradas vazias sem sobrescrever duplicados',async()=>{
+  const {archiveFiles}=await import(source('lib/archive.ts'));
+  const zip=Buffer.from(await (await archiveFiles([{name:'../foto ç.txt',blob:new Blob(['123456789'])},{name:'../foto ç.txt',blob:new Blob([])}])).arrayBuffer());
+  assert.equal(zip.readUInt32LE(0),0x04034b50);assert.equal(zip.readUInt32LE(14),0xcbf43926);
+  const nameLength=zip.readUInt16LE(26);assert.equal(zip.subarray(30,30+nameLength).toString(),'001-_foto ç.txt');
+  assert.equal(zip.subarray(30+nameLength,39+nameLength).toString(),'123456789');
+  const end=zip.length-22;assert.equal(zip.readUInt32LE(end),0x06054b50);assert.equal(zip.readUInt16LE(end+8),2);
+  const central=zip.readUInt32LE(end+16);assert.equal(zip.readUInt32LE(central),0x02014b50);assert.equal(zip.readUInt32LE(central+16),0xcbf43926);
+  assert.ok(zip.includes(Buffer.from('002-_foto ç.txt')));
+  await assert.rejects(()=>archiveFiles([]),/200 MB/);
+  await assert.rejects(()=>archiveFiles([{name:'grande',blob:{size:200*1024*1024+1}}]),/200 MB/);
+});
