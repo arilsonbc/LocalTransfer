@@ -592,11 +592,11 @@ test('ZIP local preserva nomes UTF-8, bytes, CRC e entradas vazias sem sobrescre
   const {archiveFiles}=await import(source('lib/archive.ts'));
   const zip=Buffer.from(await (await archiveFiles([{name:'../foto ç.txt',blob:new Blob(['123456789'])},{name:'../foto ç.txt',blob:new Blob([])}])).arrayBuffer());
   assert.equal(zip.readUInt32LE(0),0x04034b50);assert.equal(zip.readUInt32LE(14),0xcbf43926);
-  const nameLength=zip.readUInt16LE(26);assert.equal(zip.subarray(30,30+nameLength).toString(),'001-_foto ç.txt');
+  const nameLength=zip.readUInt16LE(26);assert.equal(zip.subarray(30,30+nameLength).toString(),'001-__foto ç.txt');
   assert.equal(zip.subarray(30+nameLength,39+nameLength).toString(),'123456789');
   const end=zip.length-22;assert.equal(zip.readUInt32LE(end),0x06054b50);assert.equal(zip.readUInt16LE(end+8),2);
   const central=zip.readUInt32LE(end+16);assert.equal(zip.readUInt32LE(central),0x02014b50);assert.equal(zip.readUInt32LE(central+16),0xcbf43926);
-  assert.ok(zip.includes(Buffer.from('002-_foto ç.txt')));
+  assert.ok(zip.includes(Buffer.from('002-__foto ç.txt')));
   await assert.rejects(()=>archiveFiles([]),/200 MB/);
   await assert.rejects(()=>archiveFiles([{name:'grande',blob:{size:200*1024*1024+1}}]),/200 MB/);
 });
@@ -627,4 +627,32 @@ test('cancelar arquivo parcial pelo remetente ou receptor preserva os demais e a
       assert.deepEqual(skipped,['cancelar.bin','cancelar.bin']);assert.ok(p.completions.every(c=>c.count===2));assert.deepEqual(p.errors,[]);
     }finally{p.left.close();p.right.close();}
   }
+});
+
+
+test('cancelamento confirmado sobrevive a perda do ACK sem repetir nem entregar arquivo parcial',async()=>{
+  const p=pair();let requested=false,dropped=false;
+  p.right.hooks.progress=(name,bytes)=>{if(name==='pular.bin'&&bytes>=65536&&!requested){requested=true;p.left.skipCurrentFile();}};
+  const send=p.right.channel.send.bind(p.right.channel);
+  p.right.channel.send=value=>{if(typeof value==='string'&&JSON.parse(value).type==='skip-ack'&&!dropped){dropped=true;setTimeout(()=>reconnectTransport(p),0);return;}send(value);};
+  try{
+    await p.left.send([new File([Buffer.alloc(2*transfer.FLOW_WINDOW)],'pular.bin'),new File(['ok'],'manter.txt')]);
+    assert.ok(dropped);assert.deepEqual(p.blobs.map(f=>f.info.name),['manter.txt']);assert.ok(p.completions.every(c=>c.count===1));assert.deepEqual(p.errors,[]);
+  }finally{p.left.close();p.right.close();}
+});
+
+test('cancelar arquivo pausado libera somente esse arquivo e lote vazio termina com zero recebidos',async()=>{
+  const p=pair();let requested=false;
+  p.right.hooks.progress=(name,bytes)=>{if(bytes>=65536&&!requested){requested=true;p.left.setPaused(true);p.left.skipCurrentFile();setTimeout(()=>p.left.setPaused(false),10);}};
+  try{await p.left.send([new File([Buffer.alloc(2*transfer.FLOW_WINDOW)],'unico.bin')]);assert.equal(p.blobs.length,0);assert.ok(p.completions.every(c=>c.count===0));assert.deepEqual(p.errors,[]);}finally{p.left.close();p.right.close();}
+});
+
+test('arquivo cancelado exige lote autorizado e navegador antigo nao exibe cancelamento individual',async()=>{
+  const p=pair();p.right.hooks.offer=()=>{};
+  try{
+    await p.right.message(JSON.stringify({type:'offer',offer:{id:'lote',files:[{id:'a',name:'a',size:0,type:''}]},flowControl:1}));
+    assert.equal(p.right.canSkipFile,false);
+    await assert.rejects(()=>p.right.message(JSON.stringify({type:'file-skip',batch:'outro',id:'a'})),/inválido/);
+    assert.equal(p.right.receiveIndex,0);
+  }finally{p.left.close();p.right.close();}
 });
