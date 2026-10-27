@@ -132,3 +132,8 @@ Abra /converter pelo menu Imagens ou pelo atalho na página inicial. Escolha JPG
 
 Limites: 20 fotos, 20 MB por arquivo, 100 MB de entrada e de resultados, 40 megapixels por imagem e maior lado de saída de até 4096 px. JPEG, PNG, WebP, AVIF, HEIC e HEIF só são decodificados se o navegador permitir. HEIC/HEIF pode falhar mesmo em aparelho atualizado; a mensagem orienta exportar JPG. Há prévia, download individual e ZIP dos resultados concluídos. Falha em uma conversão não impede as seguintes. Parar cancela a fila e descarta o resultado que ainda não terminou. Trocar fotos ou limpar libera as URLs locais; originais não são modificados.
 
+
+### Idiomas
+
+O seletor no topo oferece Português (padrão), English e Español. A escolha é salva apenas no navegador em localtransfer-language, permanece ao abrir o conversor ou recarregar e atualiza o idioma HTML e o título da página. Sem acesso ao armazenamento, a troca funciona durante a sessão. A mudança não recria salas, não interrompe transferências e não altera nomes, conteúdo de arquivos, códigos ou dados de diagnóstico. As mensagens de interface, ajuda, status e erros conhecidos têm catálogos locais; mensagens desconhecidas do navegador ou do sistema podem permanecer no idioma de origem. Diálogos nativos do navegador seguem suas próprias configurações de idioma.
+
